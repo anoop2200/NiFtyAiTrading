@@ -14,4 +14,14 @@ blackout_minutes:
   rbi_policy: [30, 30]
   union_budget: [30, 30]
 
-events: []
+# OI-07 decision (2026-11-26): NSE's event calendar covers corporate filings only (board meetings, results),
+# has no supported API, and NIFTY heavyweight results come after market hours (the gap-day rule covers the next
+# open). Macro events are taken from their official publishers and entered here by hand, each with its source.
+events:
+  # RBI MPC FY2026-27 schedule (RBI press release, 23 Mar 2026); decision announced on the last meeting day.
+  - {date: 2026-04-08, time: "10:00", type: rbi_policy, name: RBI MPC decision, source: "https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=62422"}
+  - {date: 2026-06-05, time: "10:00", type: rbi_policy, name: RBI MPC decision, source: "https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=62422"}
+  - {date: 2026-08-05, time: "10:00", type: rbi_policy, name: RBI MPC decision, source: "https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=62422"}
+  - {date: 2026-10-07, time: "10:00", type: rbi_policy, name: RBI MPC decision, source: "https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=62422"}
+  - {date: 2026-12-04, time: "10:00", type: rbi_policy, name: RBI MPC decision, source: "https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=62422"}
+  - {date: 2027-02-05, time: "10:00", type: rbi_policy, name: RBI MPC decision, source: "https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=62422"}

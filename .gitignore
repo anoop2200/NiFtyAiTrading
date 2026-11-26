@@ -25,3 +25,4 @@ logs/
 *.db-wal
 *.db-shm
 *.parquet
+data/experiments/

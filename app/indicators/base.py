@@ -201,7 +201,14 @@ class Indicator:
 
     @classmethod
     def code_sha(cls) -> str:
-        return hashlib.sha256(inspect.getsource(cls).encode()).hexdigest()
+        """Fingerprint of everything that determines this indicator's outputs: its own class plus the shared
+        framework (this module: update/reset/gap rules/batch segmentation) and the multi-timeframe Resampler.
+        A framework change therefore demotes VALIDATED definitions (and blocks APPROVED ones until a bump)."""
+        import sys
+
+        from app.indicators import engine  # local import: engine imports this module
+        parts = (inspect.getsource(cls), inspect.getsource(sys.modules[__name__]), inspect.getsource(engine.Resampler))
+        return hashlib.sha256("\n".join(parts).encode()).hexdigest()
 
     @classmethod
     def describe(cls) -> dict:

@@ -4,7 +4,8 @@ Range = 09:15-09:30 (opening_range indicator, 15 minutes). A candidate is create
 break: close beyond the range by >= confirm_atr x ATR, the breakout bar's range >= expansion_atr x ATR, and
 futures participation (relative futures volume >= min_rel_volume) when `require_futures` is on. Failed or
 uncertain breaks return NO TRADE. A break that fails (close back inside the range) ends that setup; a later
-break on either side is a new setup with a fresh confirmation. Invalidation: a close back inside the range.
+break on either side is a new setup with a fresh confirmation. Invalidation (configurable): a close back
+inside the range (default), below/above the range midpoint, or beyond the opposite edge.
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ class ORBConfig:
     require_futures: bool = True
     min_range_pct: float = 0.10       # opening range narrower than this is noise
     max_range_pct: float = 1.20       # wider than this: move already spent
+    invalidation: str = "range_edge"  # range_edge (close back inside) | range_mid | opposite_edge
     normal: ExitTemplate = field(default_factory=lambda: ExitTemplate(20.0, 30.0, 1800))
     zero_dte: ExitTemplate = field(default_factory=lambda: ExitTemplate(25.0, 40.0, 900))
     version: str = "orb-1.0.0"
@@ -42,6 +44,16 @@ class OpeningRangeBreakout:
         self.setup_n = 0
         self.inside = True          # price currently inside the range (a new break can start a setup)
         self.active_dir = 0         # direction of the setup in progress (0 = none)
+
+    def _invalidation(self, d: int, hi: float, lo: float) -> float:
+        mode = self.cfg.invalidation
+        if mode == "range_edge":
+            return hi if d > 0 else lo
+        if mode == "range_mid":
+            return (hi + lo) / 2
+        if mode == "opposite_edge":
+            return lo if d > 0 else hi
+        raise ValueError(f"unknown ORB invalidation mode {mode!r}")
 
     def _new_session(self, session: str) -> None:
         self.session, self.setup_n, self.inside, self.active_dir = session, 0, True, 0
@@ -88,5 +100,5 @@ class OpeningRangeBreakout:
         self.active_dir = d
         return [Candidate(self.strategy_id, f"orb{self.setup_n}", d,
                           thesis=f"confirmed {'up' if d > 0 else 'down'} break of 15m opening range",
-                          invalidation=hi if d > 0 else lo, normal=self.cfg.normal, zero_dte=self.cfg.zero_dte,
+                          invalidation=self._invalidation(d, hi, lo), normal=self.cfg.normal, zero_dte=self.cfg.zero_dte,
                           fresh_confirmation=fresh, features=feats | {"strategy_version": self.cfg.version})]

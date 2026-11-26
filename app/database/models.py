@@ -7,13 +7,14 @@ from __future__ import annotations
 from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 SCHEMA_DESCRIPTIONS = {
     1: "Phase 1: instruments, sessions, events, historical imports",
     2: "Phase 2: derived bar builds and daily data-quality matrix",
     3: "Phase 3: indicator definitions (registry) and indicator runs",
     4: "Phase 4: paper trades, paper trade events (audit) and capital usage",
     5: "Phase 5: trading signals (candidates + risk decisions) and risk events",
+    6: "Phase 6: experiments, experiment results, strategy trial counter, hold-outs and hold-out access log",
 }
 
 
@@ -276,3 +277,87 @@ class RiskEvents(Base):
     session_date: Mapped[str] = mapped_column(String(10), index=True)
     kind: Mapped[str] = mapped_column(String(40), index=True)
     payload: Mapped[str] = mapped_column(Text)
+
+
+class Experiments(Base):
+    """One experiment run: hypothesis, spec, fingerprints, status. Failed runs are kept (v6)."""
+    __tablename__ = "Experiments"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), index=True)
+    hypothesis: Mapped[str] = mapped_column(Text)
+    spec: Mapped[str] = mapped_column(Text)                       # canonical JSON
+    spec_hash: Mapped[str] = mapped_column(String(64), index=True)
+    strategy_set: Mapped[str] = mapped_column(String(80))
+    code_fingerprint: Mapped[str] = mapped_column(Text)           # JSON: git head/dirty + source sha
+    data_fingerprint: Mapped[str | None] = mapped_column(Text)    # JSON
+    risk_config: Mapped[str | None] = mapped_column(String(120))  # version + sha
+    fee_version: Mapped[str | None] = mapped_column(String(60))
+    fill_model: Mapped[str | None] = mapped_column(String(60))
+    status: Mapped[str] = mapped_column(String(12), index=True)   # RUNNING / COMPLETED / FAILED
+    error: Mapped[str | None] = mapped_column(Text)
+    actor: Mapped[str] = mapped_column(String(60))
+    started_at: Mapped[str] = mapped_column(String(40))
+    finished_at: Mapped[str | None] = mapped_column(String(40))
+    variants_tested: Mapped[int] = mapped_column(Integer, default=0)
+    trials_total: Mapped[int | None] = mapped_column(Integer)     # strategy-set variant counter at run time
+    holdout_id: Mapped[int | None] = mapped_column(Integer)
+    holdout_evaluated: Mapped[int] = mapped_column(Integer, default=0)
+    results_hash: Mapped[str | None] = mapped_column(String(64))
+    rerun_of: Mapped[str | None] = mapped_column(String(80))
+    reproduced: Mapped[int | None] = mapped_column(Integer)       # rerun: 1 identical results, 0 differs
+    verdict: Mapped[str | None] = mapped_column(String(30))
+    report_path: Mapped[str | None] = mapped_column(Text)
+
+
+class ExperimentResults(Base):
+    """Metrics per experiment x variant x scope (full_dev, fold:N:train, fold:N:test, wf_oos, holdout) (v6)."""
+    __tablename__ = "ExperimentResults"
+    __table_args__ = (UniqueConstraint("experiment_id", "variant_id", "scope"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    experiment_id: Mapped[str] = mapped_column(String(80), index=True)
+    variant_id: Mapped[str] = mapped_column(String(40))
+    scope: Mapped[str] = mapped_column(String(40))
+    params: Mapped[str] = mapped_column(Text)
+    metrics: Mapped[str] = mapped_column(Text)
+
+
+class StrategyTrials(Base):
+    """Variant counter for multiple-testing control: every distinct parameter set ever tested per strategy
+    set, including those from failed or discarded experiments (v6)."""
+    __tablename__ = "StrategyTrials"
+    __table_args__ = (UniqueConstraint("strategy_set", "variant_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    strategy_set: Mapped[str] = mapped_column(String(80), index=True)
+    variant_id: Mapped[str] = mapped_column(String(40))
+    params: Mapped[str] = mapped_column(Text)
+    first_experiment: Mapped[str] = mapped_column(String(80))
+    first_at: Mapped[str] = mapped_column(String(40))
+    times_tested: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class Holdouts(Base):
+    """Fixed chronological hold-out windows. SEALED until inspected once, then RETIRED (v6)."""
+    __tablename__ = "Holdouts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    sessions: Mapped[str] = mapped_column(Text)                   # JSON list
+    first_session: Mapped[str] = mapped_column(String(10))
+    last_session: Mapped[str] = mapped_column(String(10))
+    created_at: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(10), index=True)
+    inspected_by: Mapped[str | None] = mapped_column(String(60))
+    inspected_at: Mapped[str | None] = mapped_column(String(40))
+    inspected_experiment: Mapped[str | None] = mapped_column(String(80))
+    accidental_exposure: Mapped[str | None] = mapped_column(Text)  # documented exposures (JSON list)
+
+
+class HoldoutAccessLog(Base):
+    """Every request to read hold-out results, granted or refused (v6)."""
+    __tablename__ = "HoldoutAccessLog"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    holdout_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    experiment_id: Mapped[str | None] = mapped_column(String(80))
+    actor: Mapped[str] = mapped_column(String(60))
+    purpose: Mapped[str] = mapped_column(Text)
+    at: Mapped[str] = mapped_column(String(40))
+    granted: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str | None] = mapped_column(Text)

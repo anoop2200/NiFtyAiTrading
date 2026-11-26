@@ -1,4 +1,4 @@
-# NiftyTradingAI — Phase 1 (foundation + data recorder) Phase 2 (market data layer), Phase 3 (indicator framework), Phase 4 (backtester + paper broker) and Phase 5 (rule strategies + risk)
+# NiftyTradingAI — Phase 1 (foundation + data recorder) Phase 2 (market data layer), Phase 3 (indicator framework), Phase 4 (backtester + paper broker), Phase 5 (rule strategies + risk) and Phase 6 (experiment tracking)
 
 Design baseline: `NiftyTradingAI_v1.3_Revised_Architecture.docx`. Paper trading only; no order APIs exist in this code.
 
@@ -89,7 +89,7 @@ with row count, snapshot count, checksum and quality metrics (gaps, crossed quot
 | Piece | Where |
 |---|---|
 | NSE trading calendar 2026 (holidays, sessions, Muhurat special session, expiry adjustment, DTE, fail-closed for uncovered years) | `config/calendar/nse_2026.yaml`, `app/market/calendar.py` |
-| Event calendar with mandatory source + blackout windows (OI-07 still open: no events loaded yet) | `config/calendar/events.yaml` |
+| Event calendar with mandatory source + blackout windows. OI-07 decided: macro events are entered by hand from official publishers (RBI MPC FY27 loaded); the NSE event calendar covers corporate filings only and has no supported API | `config/calendar/events.yaml` |
 | Dated instrument map + futures roll rule (volume cross-over or 2 trading days before expiry) | `app/market/mapping.py` |
 | Quote normalizer with quality flags (DUPLICATE, OUT_OF_ORDER, CROSSED, ZERO_QTY, INVALID_INSTRUMENT, CLOCK_SKEW, PARSE_ERROR, LATE); bid/ask never forward-filled | `app/marketdata/normalize.py` |
 | Staleness: feed liveness vs per-instrument change age (FRESH / QUIET_CONFIRM / STALE / FEED_DOWN) | `app/marketdata/staleness.py` |
@@ -100,8 +100,8 @@ with row count, snapshot count, checksum and quality metrics (gaps, crossed quot
 | SQLite schema v2: `BarBuilds` (provenance + reconciliation JSON), `DataQualityDaily` | `app/database/models.py` |
 
 ```
-.venv\Scripts\python scriptsuild_history_bars.py --reconcile     # PG history -> bars, spot vs Dhan index candles
-.venv\Scripts\python scriptsuild_bars.py 2026-12-01 --reconcile  # recorded feed day -> bars + quality matrix
+.venv\Scripts\python scripts\build_history_bars.py --reconcile     # PG history -> bars, spot vs Dhan index candles
+.venv\Scripts\python scripts\build_bars.py 2026-12-01 --reconcile  # recorded feed day -> bars + quality matrix
 ```
 
 ### Documented reconciliation tolerance
@@ -178,8 +178,16 @@ relative volume on a labelled synthetic stream, so they cannot be approved until
 **IV check vs provider IV in optionchain_db** (ATM, last 10 days): with 1+ days to expiry our IV is within
 ~0.35 (PE) / ~1.1 (CE) vol points of the provider. On expiry day (0DTE) ours is ~12 vol points higher: the
 provider evidently uses a different time-to-expiry convention. This matters because expiry days are traded —
-**open item**: decide the 0DTE time convention (calendar seconds vs trading-time / variance-time) and stress-test
-the r/q assumptions before any IV-based rule is approved.
+**Decision (2026-11-26):** India VIX is the market volatility-level input for rules and regimes. Per-contract
+BSM IV is kept for Greeks only. Delta is effectively independent of the time convention, because the premium pins
+σ√T: shortening the 0DTE clock by 38% moved IV by ~4 vol points but ATM delta by < 0.005. Contract selection is
+therefore unaffected. `atm_iv` must not be compared across DTEs as a level. Still to build: an India VIX data
+stream (live feed + history backfill).
+
+**Approval (2026-11-26):** after the framework-hash change (`code_sha` now also covers `base.py` and the
+`Resampler`), all 19 indicators were revalidated (all pass). The 17 validated on real history were set APPROVED on
+the owner's explicit instruction (audited, actor `anoop2200`). `vwap` and `fut_rel_volume` stay DRAFT until real
+futures data exists.
 
 ## Phase 4 — event-driven backtester + paper broker (v1.3 §8.3, §9.6, §9.7, §10.2)
 
@@ -212,7 +220,10 @@ the r/q assumptions before any IV-based rule is approved.
 all audit chains valid; fills spot-checked against raw snapshots (entry = ask + 1 tick, exit = bid − 1 tick).
 The demo's P&L is **not** a strategy result — Phase 5 builds the real strategies with the risk engine.
 
-Open items: verify `config/fees.yaml` against a real Dhan contract note (IPFT currently 0); latency 250 ms is
+Open items: verify `config/fees.yaml` against a real Dhan contract note. IPFT (NSE Investor Protection Fund Trust
+levy) is currently 0. NSE cut the options IPFT to about ₹0.01/crore of premium from 1 Mar 2026 and raised the
+transaction charge to compensate, which may move `exchange_txn_pct` slightly; this is unconfirmed until the
+contract note or circular FA73061 is read; latency 250 ms is
 an assumption until live decision→order timings are measured; history has only top-of-book (depth-ladder
 fills get exercised once live sessions are recorded).
 
@@ -231,7 +242,6 @@ fills get exercised once live sessions are recorded).
 | TradingSignals + RiskEvents (schema v5) | `app/database/models.py` |
 
 ```
-.venv\Scripts\python scripts
 .venv\Scripts\python scripts\run_strategies.py --verify-replay   # -> data/backtests/<run_id>/ + research DB
 ```
 
@@ -256,6 +266,51 @@ Open items: futures history is needed to test the strategies as specified; the O
 inside the range) drives most exits and is the first thing to evaluate in Phase 6; the indicator registry hashes
 only each indicator class, so framework changes in `app/indicators/base.py` (Phase 5 fixed the missing-data reset
 for resampled 5-minute bars) do not demote VALIDATED status automatically.
+
+## Phase 6 — experiment tracking (v1.3 §10.2–§10.4)
+
+| Piece | Where |
+|---|---|
+| Experiment spec: hypothesis, strategies, parameter grid, walk-forward layout, selection metric, frozen hold-out variant; canonical hash; strict validation of every parameter | `app/research/spec.py`, `config/experiments/*.yaml` |
+| Multi-variant simulator over history with the production pipeline + risk engine (days outer, variants inner; shared with `run_strategies.py`) | `app/research/simulate.py` |
+| Fixed chronological hold-out (latest 20%, min 20 sessions), rolling/anchored walk-forward on development sessions only | `app/research/splits.py` |
+| Metrics: net expectancy (₹ and R), PF, win rate, max DD (₹ and R), session Sharpe, exit-reason shares, costs, turnover; DTE / strategy / regime / time-of-day segments; session-block bootstrap CIs; Deflated Sharpe Ratio with the global trial count; §10.4 promotion screen | `app/research/metrics.py` |
+| Hold-out custody (single use, every request logged granted or refused, exposures documented), strategy-set variant counter (counts failed experiments too), code fingerprint | `app/research/registry.py` |
+| Runner: RUNNING → COMPLETED / FAILED (traceback kept), results hash, rerun check, report.json + report.md | `app/research/runner.py` |
+| Experiments, ExperimentResults, StrategyTrials, Holdouts, HoldoutAccessLog (schema v6, research DB) | `app/database/models.py` |
+
+```
+.venv\Scripts\python scripts\run_experiment.py run config\experiments\orb_invalidation_v1.yaml --actor NAME
+.venv\Scripts\python scripts\run_experiment.py rerun <experiment_id> --actor NAME
+.venv\Scripts\python scripts\run_experiment.py list
+.venv\Scripts\python scripts\run_experiment.py holdouts
+```
+
+The hold-out is only evaluated with `run <spec> --holdout --actor NAME --purpose "..."` for the spec's
+`holdout_variant`; that access is logged and retires the hold-out. `run_strategies.py` now excludes the sealed
+hold-out unless `--include-holdout --actor NAME` (recorded as an exposure, which retires it).
+
+### Phase 6 acceptance checklist
+
+| Criterion | Evidence |
+|---|---|
+| Same experiment reruns reproduce metrics | `test_rerun_reproduces_metrics`, `test_changed_result_is_flagged_not_reproduced`; real data: `orb_invalidation_v1` rerun gave the identical results hash (`reproduced=1`) |
+| Hold-out access logged | `test_holdout_sealed_is_stable_and_single_use_with_logging`, `test_holdout_evaluated_once_logged_and_retired`, `test_holdout_sessions_never_used_in_development`; `HoldoutAccessLog` |
+| Failed experiments retained | `test_failed_experiment_is_retained_with_trials_counted` (status FAILED, traceback, variants still counted) |
+
+**First experiment — `orb_invalidation_v1`** (6 variants: ORB invalidation range_edge / range_mid /
+opposite_edge × confirmation 0.25 / 0.5 ATR; development 2026-08-27..2026-10-23, 39 sessions; hold-out
+2026-10-26..2026-11-25 sealed). The hypothesis that a looser invalidation helps is **not supported**: every
+looser variant did worse than the Phase 5 default over the development period. Walk-forward OOS (3 folds, 24
+sessions): 48 trades, net −₹8,252, −0.04 R, PF 0.72; bootstrap 95% CI of expectancy straddles zero; DSR 0.08.
+Verdict REJECT (OOS sample, net performance, PF, multiple testing). 0DTE was the only positive segment (8 trades —
+far too few to mean anything).
+
+Hold-out note: the Phase 4/5 full-history runs reported aggregates that include the hold-out sessions before it
+was sealed, and this experiment's hypothesis came from those aggregates. Hold-out 1 was therefore **retired by
+operator decision on 2026-11-26** (recorded in `HoldoutAccessLog`). All 59 history sessions are now development
+data. History is the snapshot tier, which cannot meet the observed-feed promotion gate anyway. The next hold-out
+forms automatically from live-recorded sessions after 2026-11-25, once at least 20 of them exist.
 
 ## Single-writer note
 

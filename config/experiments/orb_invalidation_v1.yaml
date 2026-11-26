@@ -1,0 +1,23 @@
+# Phase 6 first experiment. Variants are counted for multiple testing even if this file changes later.
+name: orb_invalidation_v1
+hypothesis: >
+  The Phase 5 ORB invalidation (exit on any close back inside the opening range) cuts trades before the
+  breakout can work: 58 of 82 ORB exits were invalidations. A looser invalidation (range midpoint or the
+  opposite edge) and a stricter breakout confirmation should raise ORB net expectancy after costs.
+strategies: [orb, pullback]
+grid:
+  orb.invalidation: [range_edge, range_mid, opposite_edge]
+  orb.confirm_atr: [0.25, 0.5]
+walk_forward:
+  train_sessions: 15
+  test_sessions: 8
+  step_sessions: 8
+  anchored: false
+  min_train_trades: 10
+selection_metric: net_expectancy_r
+holdout_variant:            # frozen choice for a later, single hold-out review (not used without --holdout)
+  orb.invalidation: range_mid
+  orb.confirm_atr: 0.25
+history_overrides:
+  require_futures: false    # PG history has no futures bars; results are labelled history_without_futures
+notes: History is top-of-book snapshots only; execution-cost conclusions need observed_feed data.
