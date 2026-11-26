@@ -101,6 +101,12 @@ class Indicator:
         p = ",".join(f"{k}={v}" for k, v in sorted(self.params.items()))
         return f"{self.SPEC.id}@{self.SPEC.version}({p})"
 
+    def gap_limit(self, tf_s) -> int:
+        """Largest bar-to-bar gap that is not a data gap: max_input_age_s for 1-minute bars, plus the extra
+        bar length for resampled bars (a final 5-minute bar arrives every 300 s)."""
+        tf = 60 if tf_s is None or tf_s != tf_s else int(tf_s)
+        return self.SPEC.max_input_age_s + tf - 60
+
     def reset(self) -> None:
         self.n = 0
         self.reset_count += 1
@@ -118,9 +124,10 @@ class Indicator:
             new_session = sess is not None and sess != self.session
             if self.SPEC.session_reset and new_session:
                 self.reset()
-            elif self.SPEC.missing_data == "reset" and gap > self.SPEC.max_input_age_s and not new_session:
+            elif self.SPEC.missing_data == "reset" and not new_session and gap > self.gap_limit(bar.get("tf_s")):
                 # intraday data gap: state built on missing bars is not trusted. Overnight gaps are normal
-                # for continuous indicators, so state carries across sessions.
+                # for continuous indicators, so state carries across sessions. Resampled bars carry `tf_s`, so
+                # the allowed gap grows with the timeframe (a 5-minute bar arrives every 300 s).
                 self.reset()
         self.last_ts, self.session = ts, sess
         if any(_missing(bar.get(f)) for f in self.SPEC.source.fields):
@@ -181,12 +188,13 @@ class Indicator:
         """Split rows where streaming would reset (session start / intraday gap)."""
         ts = df["ts"].astype("int64").to_numpy()
         sess = df["session"].to_numpy() if "session" in df else [None] * len(df)
+        tfs = df["tf_s"].to_numpy() if "tf_s" in df else [None] * len(df)
         cuts = [0]
         for i in range(1, len(df)):
             new_session = sess[i] is not None and sess[i] != sess[i - 1]
             gap = ts[i] - ts[i - 1]
             if (self.SPEC.session_reset and new_session) or (
-                    self.SPEC.missing_data == "reset" and gap > self.SPEC.max_input_age_s and not new_session):
+                    self.SPEC.missing_data == "reset" and gap > self.gap_limit(tfs[i]) and not new_session):
                 cuts.append(i)
         cuts.append(len(df))
         return [df.index[a:b] for a, b in zip(cuts, cuts[1:]) if b > a]

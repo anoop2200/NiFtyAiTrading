@@ -7,12 +7,13 @@ from __future__ import annotations
 from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SCHEMA_DESCRIPTIONS = {
     1: "Phase 1: instruments, sessions, events, historical imports",
     2: "Phase 2: derived bar builds and daily data-quality matrix",
     3: "Phase 3: indicator definitions (registry) and indicator runs",
     4: "Phase 4: paper trades, paper trade events (audit) and capital usage",
+    5: "Phase 5: trading signals (candidates + risk decisions) and risk events",
 }
 
 
@@ -240,3 +241,38 @@ class CapitalUsage(Base):
     largest_trade_risk: Mapped[float] = mapped_column(Float)
     largest_0dte_risk: Mapped[float] = mapped_column(Float)
     trades: Mapped[int] = mapped_column(Integer)
+
+
+class TradingSignals(Base):
+    """Every strategy candidate / no-trade with contract selection and the full risk decision (v5)."""
+    __tablename__ = "TradingSignals"
+    __table_args__ = (UniqueConstraint("run_id", "session_date", "seq"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(60), index=True)
+    session_date: Mapped[str] = mapped_column(String(10), index=True)
+    seq: Mapped[int] = mapped_column(Integer)
+    ts: Mapped[str] = mapped_column(String(40))
+    strategy_id: Mapped[str] = mapped_column(String(40), index=True)
+    setup_id: Mapped[str | None] = mapped_column(String(40))
+    cycle_key: Mapped[str | None] = mapped_column(String(120))
+    direction: Mapped[int | None] = mapped_column(Integer)
+    outcome: Mapped[str] = mapped_column(String(20), index=True)     # APPROVED / REJECTED / NO_TRADE
+    reasons: Mapped[str] = mapped_column(Text)                         # JSON list
+    contract: Mapped[str | None] = mapped_column(String(60))
+    dte: Mapped[int | None] = mapped_column(Integer)
+    lots: Mapped[int | None] = mapped_column(Integer)
+    planned_r_inr: Mapped[float | None] = mapped_column(Float)
+    shadow_lots: Mapped[int | None] = mapped_column(Integer)
+    trade_id: Mapped[int | None] = mapped_column(Integer)
+    payload: Mapped[str] = mapped_column(Text)                         # JSON: features, checks, selection
+    risk_config_version: Mapped[str | None] = mapped_column(String(40))
+
+
+class RiskEvents(Base):
+    """Risk-engine and kill-switch events: latches, limits, inconsistencies, acknowledgements (v5)."""
+    __tablename__ = "RiskEvents"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(60), index=True)
+    session_date: Mapped[str] = mapped_column(String(10), index=True)
+    kind: Mapped[str] = mapped_column(String(40), index=True)
+    payload: Mapped[str] = mapped_column(Text)

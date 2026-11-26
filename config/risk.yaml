@@ -1,0 +1,56 @@
+# Risk configuration (v1.3 §9). Paper-trading defaults for controlled testing — NOT live-capital advice.
+# Versioned: any change is a commit (signed configuration change for expiry-profile changes, §9.6).
+# The risk engine refuses every entry if this file is missing, unreadable or fails validation.
+version: risk-1.0.0
+
+sizing:
+  lots_per_trade: 1
+  lots_per_trade_0dte: 1
+  shadow_risk_pct: 0.50            # reported only: lots that would fit this risk for a given capital
+  shadow_risk_pct_0dte: 0.25
+  shadow_capital_inr: 500000       # capital used for the shadow-size report
+  slippage_ticks_per_side: 1       # included in planned R
+
+limits:
+  max_daily_loss_r: 3.0            # realized + unrealized sum of R multiples; new entries disabled at -3R
+  daily_loss_open_policy: monitor  # monitor | close  (what happens to open positions at the daily limit)
+  max_open_risk_r: 2.0
+  max_concurrent_positions: 1
+  max_entries_per_day: 5
+  max_consecutive_losses: 3        # disables entries for the session; manual reset, next session only
+  cooldown_after_stop_min: 15      # per strategy / setup direction
+  max_holding_min: 30
+
+zero_dte:
+  max_entries: 2
+  last_entry: "14:30"
+  max_holding_min: 15
+  stop_pct: [20, 30]               # allowed exit-template range for 0DTE
+  target_pct: [30, 50]
+
+windows:
+  no_entry_open_until: "09:25"
+  last_entry: "15:00"
+  flat_by: "15:25"
+  gap_day_entry_after: "09:45"     # if opening gap > gap_atr_multiple x prior-day ATR
+  gap_atr_multiple: 1.0
+
+quotes:
+  min_premium: 30.0
+  max_spread_ticks: 2              # spread must be <= max(2 ticks, 1% of mid) ...
+  max_spread_pct_of_mid: 1.0
+  max_spread_pct_of_target: 10.0   # ... and <= 10% of the planned target distance
+  tick: 0.05
+  max_quote_age_s: 30              # live: change age (REST confirmation above 5 s handled by data layer)
+  max_chain_age_s: 10              # for OI / IV / Greeks dependent rules
+  feed_liveness_s: 3
+
+exit_templates:                    # premium-space templates; strategies may only pick inside these ranges
+  normal: {stop_pct: [15, 25], target_pct: [20, 35]}
+
+kill_switch:
+  auto:
+    feed_outage_s: 10
+    clock_skew_ms: 1000
+    max_engine_restarts: 3
+  manual_state_file: data/runtime/kill_switch.json

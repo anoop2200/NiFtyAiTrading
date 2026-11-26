@@ -100,6 +100,11 @@ class PaperBroker:
         self._seq = itertools.count()
         self.capital = {"deployed": 0.0, "peak": 0.0, "peak_ns": None, "peak_trades": []}
         self.cycles_open: dict[str, int] = {}
+        self.listeners: list = []   # objects with on_broker_event(kind, payload): risk engine, persistence
+
+    def _notify(self, kind: str, **payload) -> None:
+        for listener in self.listeners:
+            listener.on_broker_event(kind, payload)
 
     # ------------------------------------------------------------------ timers (driven by the replay engine)
     def _timer(self, ts: int, kind: str, ref: int) -> None:
@@ -129,9 +134,11 @@ class PaperBroker:
     def submit_entry(self, it: EntryIntent) -> int | None:
         if it.decision_ns >= flat_ns(it.decision_ns):
             self.audit.add(it.decision_ns, "entry_rejected", cycle=it.cycle_key, reason="AFTER_FLAT_TIME")
+            self._notify("entry_not_filled", cycle_key=it.cycle_key, trade_id=None, reason="AFTER_FLAT_TIME")
             return None
         if it.cycle_key in self.cycles_open:
             self.audit.add(it.decision_ns, "entry_rejected", cycle=it.cycle_key, reason="CYCLE_ALREADY_ACTIVE")
+            self._notify("entry_not_filled", cycle_key=it.cycle_key, trade_id=None, reason="CYCLE_ALREADY_ACTIVE")
             return None
         tid = next(self._ids)
         p = self.positions[tid] = Position(tid, it)
@@ -141,6 +148,20 @@ class PaperBroker:
                        target_pct=it.target_pct, time_stop_s=it.time_stop_s, dte=it.dte, meta=it.meta)
         self._new_order(p, "ENTRY", "BUY", it.lots * it.lot_size, it.decision_ns)
         return tid
+
+    def open_trade_ids(self) -> set[int]:
+        return {t for t, p in self.positions.items() if p.status in ("OPEN", "EXITING")}
+
+    def unrealized_inr(self) -> dict[int, float]:
+        """Mark-to-bid P&L of open positions net of entry charges (no exit charges)."""
+        out = {}
+        for t, p in self.positions.items():
+            if p.status in ("OPEN", "EXITING") and p.qty:
+                q = self.book.get(p.intent.contract)
+                if q is not None and q.bid and q.bid > 0:
+                    left = p.qty - sum(f[2] for f in p.exit_fills)
+                    out[t] = (q.bid - p.entry_px) * left - p.entry_charges
+        return out
 
     def request_exit(self, trade_id: int, now_ns: int, reason: str) -> None:
         p = self.positions[trade_id]
@@ -237,6 +258,8 @@ class PaperBroker:
                 p.status = "CANCELLED"
                 self.cycles_open.pop(p.intent.cycle_key, None)
                 self.audit.add(now_ns, "entry_not_filled", trade_id=p.trade_id, reason=o.last_reason)
+                self._notify("entry_not_filled", cycle_key=p.intent.cycle_key, trade_id=p.trade_id,
+                             reason=o.last_reason)
             else:
                 self._capital(now_ns, o.charges["total"])
         else:
@@ -258,6 +281,8 @@ class PaperBroker:
             if first:
                 p.status, p.opened_ns = "OPEN", ts
                 self.audit.add(ts, "position_opened", trade_id=p.trade_id, stop=p.stop, target=p.target)
+                self._notify("position_opened", cycle_key=p.intent.cycle_key, trade_id=p.trade_id, entry_px=px,
+                             qty=qty)
                 self._timer(ts + p.intent.time_stop_s * NS, "time_stop", p.trade_id)
                 self._timer(flat_ns(ts), "flat", p.trade_id)
         else:
@@ -292,6 +317,7 @@ class PaperBroker:
              "fill_model": self.cfg.version}
         self.trades.append(t)
         self.audit.add(ts, "trade_closed", **t)
+        self._notify("trade_closed", trade=t)
 
     def mark_unfilled_at_close(self, now_ns: int) -> None:
         """End of data: anything still exiting is closed at the last valid bid (flagged)."""

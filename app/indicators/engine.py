@@ -33,14 +33,14 @@ class Resampler:
         if self.cur is not None and (b != self.cur["ts"] or bar.get("session") != self.cur.get("session")):
             out.append(self._close())
         if self.cur is None:
-            self.cur = {**bar, "ts": b, "minutes": 0}
+            self.cur = {**bar, "ts": b, "minutes": 0, "tf_s": self.tf_s}
             self.cur.pop("volume", None)
             self.cur["volume"] = 0
         c = self.cur
         c["high"] = max(c["high"], bar["high"]) if c.get("high") is not None else bar.get("high")
         c["low"] = min(c["low"], bar["low"]) if c.get("low") is not None else bar.get("low")
         for k, v in bar.items():  # last-value fields (close, oi, quotes...) come from the latest minute
-            if k not in ("ts", "open", "high", "low", "volume"):
+            if k not in ("ts", "open", "high", "low", "volume", "tf_s"):
                 c[k] = v
         c["volume"] += bar.get("volume") or 0
         c["minutes"] += 1

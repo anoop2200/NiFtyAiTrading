@@ -1,4 +1,4 @@
-# NiftyTradingAI — Phase 1 (foundation + data recorder) Phase 2 (market data layer), Phase 3 (indicator framework) and Phase 4 (backtester + paper broker)
+# NiftyTradingAI — Phase 1 (foundation + data recorder) Phase 2 (market data layer), Phase 3 (indicator framework), Phase 4 (backtester + paper broker) and Phase 5 (rule strategies + risk)
 
 Design baseline: `NiftyTradingAI_v1.3_Revised_Architecture.docx`. Paper trading only; no order APIs exist in this code.
 
@@ -215,6 +215,47 @@ The demo's P&L is **not** a strategy result — Phase 5 builds the real strategi
 Open items: verify `config/fees.yaml` against a real Dhan contract note (IPFT currently 0); latency 250 ms is
 an assumption until live decision→order timings are measured; history has only top-of-book (depth-ladder
 fills get exercised once live sessions are recorded).
+
+## Phase 5 — rule strategies + independent risk engine (v1.3 §6, §7, §9)
+
+| Piece | Where |
+|---|---|
+| Risk config (versioned, strictly validated; missing/invalid = NO TRADE for everything) | `config/risk.yaml`, `app/risk/config.py` |
+| Risk engine: daily loss −3R (realized + unrealized), open risk 2R, 1 position, 5 entries/day, 3-loss latch (manual reset, next session only), 15-min cooldown after a stop, entry windows (09:25–15:00), gap-day block to 09:45, event blackout, 0DTE limits (2 entries, 14:30, 15-min hold, template ranges), quote/chain/feed freshness, min premium ₹30, spread ≤ max(2 ticks, 1% mid) and ≤ 10% of target, planned R incl. charges + slippage, shadow sizing (report only). Every check is evaluated and audited; an exception is NO TRADE + kill switch | `app/risk/engine.py` |
+| Kill switch: manual (state file re-read on every evaluation, optional emergency close) and automatic (feed outage, clock skew, DB write failure, crash loop, inconsistent risk state, evaluation error) with operator acknowledgement | `app/risk/killswitch.py` |
+| Cycle rules: key = profile+date+strategy+setup+direction, one position per cycle, no re-entry, no CE+PE for the same strategy, opposite direction needs a fresh confirmation | `RiskEngine` + broker `cycles_open` |
+| Opening-range breakout (15-min range, k·ATR confirmation, range expansion, futures participation, invalidation = close back in range) | `app/strategies/orb.py` |
+| Trend pullback (5-min EMA9/21 + ADX/DI trend, touch of EMA21, resumption with RSI, futures VWAP agreement, invalidation EMA21 ∓ 0.5·ATR) | `app/strategies/pullback.py` |
+| Contract eligibility + deterministic ranking (ATM ±5, nearest expiry + next on expiry day, abs delta 0.35–0.65, spread, theta burn; every rejected contract recorded) | `app/strategies/contracts.py` |
+| Decision pipeline (data gate → strategy → contract → risk → EntryIntent), risk fed by broker events, invalidation / daily-loss / emergency exits | `app/pipeline/decision.py` |
+| TradingSignals + RiskEvents (schema v5) | `app/database/models.py` |
+
+```
+.venv\Scripts\python scripts
+.venv\Scripts\python scripts\run_strategies.py --verify-replay   # -> data/backtests/<run_id>/ + research DB
+```
+
+### Phase 5 acceptance checklist
+
+| Criterion | Evidence |
+|---|---|
+| Risk unit tests cover every limit | `tests/test_risk.py` (61 tests: each limit, windows, 0DTE, gap day, blackout, cooldown, latch + reset rules, quote checks, planned R) |
+| Cycle / duplicate / opposite-direction tests | `test_duplicate_cycle_*`, `test_opposite_direction_*`, `test_ce_and_pe_cannot_both_be_open_*` |
+| No trade when risk config is missing | `test_missing_config_means_no_trade`, 11 invalid-config cases, `test_pipeline_missing_risk_config_never_trades` |
+| No live order calls | `test_no_live_order_calls_anywhere_in_app` (static scan of `app/`), paper broker only |
+
+**Real-data run** (59 sessions, label `history_without_futures/observed_top_of_book_snapshot`): the PG history has
+no futures bars, so ORB futures participation and pullback futures-VWAP are switched off for this run only
+(production keeps them required). The consecutive-loss latch is reset by a simulated operator at the next session
+(`--no-latch-reset` to disable). Result: 127 trades (ORB 82, pullback 45), net −₹14,197 after ₹7,924 charges,
+avg −0.03R; 0–1 DTE trades positive, 2+ DTE negative; 66 exits by setup invalidation. Deterministic replay hash
+identical across runs, all audit chains valid. These are **untuned first-version rules on low-fidelity data —
+not evidence of an edge**; Phase 6 (experiment tracking) is where parameters get evaluated walk-forward.
+
+Open items: futures history is needed to test the strategies as specified; the ORB invalidation (any close back
+inside the range) drives most exits and is the first thing to evaluate in Phase 6; the indicator registry hashes
+only each indicator class, so framework changes in `app/indicators/base.py` (Phase 5 fixed the missing-data reset
+for resampled 5-minute bars) do not demote VALIDATED status automatically.
 
 ## Single-writer note
 
