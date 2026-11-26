@@ -97,6 +97,8 @@ class Recorder:
         self.clock_offset_ms: float | None = None
         self.last_error: str | None = None
         self.session_id: int | None = None
+        self.taps: list = []          # in-process consumers of every feed batch (Phase 9 paper engine)
+        self.tap_errors = 0
         url = (f"{cfg.get('dhan.feed_url')}?version=2&token={prepared.token}"
                f"&clientId={prepared.client_id}&authType=2")  # never logged
         self.feed = FeedClient(url, self._on_rows, self._on_event,
@@ -113,6 +115,13 @@ class Recorder:
             if r.get("security_id") == self.index_id and r.get("segment") == 0 and r.get("ltp"):
                 self.index_ltp = r["ltp"]
         self.feed_writer.add_many(rows)
+        for tap in self.taps:
+            try:
+                tap(rows)
+            except Exception as e:  # noqa: BLE001 - a consumer must never stop the recording
+                self.tap_errors += 1
+                if self.tap_errors <= 5:
+                    logger.error(f"feed tap failed: {e!r}")
 
     def _on_event(self, name: str, detail: dict) -> None:
         level = "WARNING" if "error" in name or "disconnect" in name else "INFO"

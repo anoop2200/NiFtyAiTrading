@@ -77,7 +77,9 @@ class KillSwitch:
         for f in sorted(Path(self.inbox).glob("*.json")):
             try:
                 cmd = json.loads(f.read_text(encoding="utf-8"))
-                if cmd.get("command") == "ack_auto" and cmd.get("actor"):
+                if cmd.get("command") != "ack_auto":
+                    continue   # other commands belong to the paper engine (app.engine.session)
+                if cmd.get("actor"):
                     self.acknowledge(cmd["actor"])
                     self.history.append({"at": iso(), "event": "command_applied", "command": cmd, "file": f.name})
                 os.replace(f, f.with_suffix(".done"))

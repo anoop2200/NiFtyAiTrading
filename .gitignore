@@ -26,3 +26,4 @@ logs/
 *.db-shm
 *.parquet
 data/experiments/
+data/paper/

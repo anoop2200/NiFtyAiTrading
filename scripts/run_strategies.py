@@ -18,17 +18,17 @@ import json
 
 import _bootstrap  # noqa: F401
 import pandas as pd
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.backtest.fees import FeeSchedule
 from app.backtest.history import TIER
-from app.backtest.persist import persist_session
+from app.backtest.persist import persist_session, persist_signals
 from app.backtest.report import summarize
 from app.clock import now_ist
 from app.config import settings
 from app.database.db import init_db, make_engine
-from app.database.models import Holdouts, RiskEvents, TradingSignals
+from app.database.models import Holdouts
 from app.indicators.datasets import pg_spot_stream
 from app.logging_setup import setup_logging
 from app.market.calendar import EventCalendar, TradingCalendar
@@ -46,22 +46,7 @@ def run_all(cfg, ds, days, cal, fees, events, run_id, research=None, latch_reset
 
     def persist(_vid, day, broker, pipe, risk):
         persist_session(research, broker, run_id, day, mode="backtest")
-        with Session(research) as s:
-            for m in (TradingSignals, RiskEvents):
-                s.execute(delete(m).where(m.run_id == run_id, m.session_date == day))
-            tid_by_cycle = {t["cycle"]: t["trade_id"] for t in broker.trades}
-            for x in pipe.signals:
-                s.add(TradingSignals(run_id=run_id, session_date=day, seq=x["seq"], ts=x["ts"],
-                                     strategy_id=x["strategy_id"], setup_id=x["setup_id"], cycle_key=x["cycle_key"],
-                                     direction=x["direction"], outcome=x["outcome"], reasons=json.dumps(x["reasons"]),
-                                     contract=x["contract"], dte=x["dte"], lots=x["lots"],
-                                     planned_r_inr=x["planned_r_inr"], shadow_lots=x["shadow_lots"],
-                                     trade_id=tid_by_cycle.get(x["cycle_key"]),
-                                     payload=json.dumps(x["payload"], default=str),
-                                     risk_config_version=x["risk_config_version"]))
-            for e in risk.state.events:   # state (and its events) is per session
-                s.add(RiskEvents(run_id=run_id, session_date=day, kind=e["kind"], payload=json.dumps(e, default=str)))
-            s.commit()
+        persist_signals(research, run_id, day, pipe.signals, broker.trades, risk.state.events)
 
     strategies = build_strategies(("orb", "pullback"), {}, {"require_futures": False})
     run = simulate(ctx, {"default": strategies}, latch_reset=latch_reset,

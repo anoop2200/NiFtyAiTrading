@@ -129,6 +129,16 @@ def acknowledge_auto(actor: str, reason: str, commands: Path = COMMANDS, log: Op
     return rec
 
 
+def reset_loss_latch(actor: str, reason: str, commands: Path = COMMANDS, log: OperatorLog | None = None) -> dict:
+    """Ask the paper engine to reset the consecutive-loss latch (allowed only in a later session than the one
+    that hit the limit; the engine checks that and records the reset as a risk event)."""
+    log = log or OperatorLog()
+    rec = log.append("loss_latch_reset_requested", actor, reason)
+    post_command({"command": "reset_loss_latch", "actor": actor.strip(), "reason": reason.strip(),
+                  "operator_log_hash": rec["hash"]}, commands)
+    return rec
+
+
 def post_command(cmd: dict, commands: Path = COMMANDS) -> Path:
     commands.mkdir(parents=True, exist_ok=True)
     name = f"{iso().replace(':', '').replace('+', 'p')}_{uuid.uuid4().hex[:8]}.json"

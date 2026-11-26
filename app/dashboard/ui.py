@@ -152,6 +152,14 @@ def page_trades():
     cap = D.capital(eng, run)
     if day != "(all)":
         cap = cap[cap["session_date"] == day]
+    ps = D.paper_sessions(eng)
+    if not ps.empty:
+        ps = ps[ps["run_id"] == run]
+        if len(ps):
+            st.subheader("Paper-engine sessions (journal, recovery, reconciliation)")
+            ps = ps.assign(reconciled=ps["reconciliation"].map(lambda x: json.loads(x or "{}").get("ok")),
+                           unresolved=ps["incidents"].map(lambda x: sum(not i["resolved"] for i in json.loads(x or "[]"))))
+            st.dataframe(ps.drop(columns=["reconciliation", "incidents"]), width="stretch", hide_index=True)
     st.subheader("Capital usage per session (§9.7)")
     st.dataframe(cap.drop(columns=["id", "run_id"]), width="stretch", hide_index=True)
 
@@ -208,6 +216,14 @@ def page_research():
         st.dataframe(D.holdouts(engs["research"]), width="stretch", hide_index=True)
         st.subheader("Backtest runs")
         st.dataframe(D.runs(engs["research"]), width="stretch", hide_index=True)
+    for name in ("main", "research"):
+        if name in engs:
+            ls = D.label_summary(engs[name])
+            if not ls.empty:
+                st.subheader(f"Candidate labels — Phase 7 track ({name} DB)")
+                st.caption("Only prospective live-feed labels (data_tier observed_feed) count toward the 500-label "
+                           "training threshold; history-tier labels exercise the pipeline.")
+                st.dataframe(ls, width="stretch", hide_index=True)
     if "main" in engs:
         st.subheader("Indicator registry")
         st.dataframe(D.indicators(engs["main"]), width="stretch", hide_index=True)

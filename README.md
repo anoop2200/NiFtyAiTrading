@@ -1,4 +1,4 @@
-# NiftyTradingAI — Phase 1 (foundation + data recorder) Phase 2 (market data layer), Phase 3 (indicator framework), Phase 4 (backtester + paper broker), Phase 5 (rule strategies + risk), Phase 6 (experiment tracking) and Phase 8 (dashboard + alerts)
+# NiftyTradingAI — Phase 1 (foundation + data recorder) Phase 2 (market data layer), Phase 3 (indicator framework), Phase 4 (backtester + paper broker), Phase 5 (rule strategies + risk), Phase 6 (experiment tracking), Phase 8 (dashboard + alerts) and Phase 9 (paper engine + candidate labels)
 
 Design baseline: `NiftyTradingAI_v1.3_Revised_Architecture.docx`. Paper trading only; no order APIs exist in this code.
 
@@ -348,6 +348,54 @@ the general last entry).
 | Notifications deduplicated | `test_dedup_and_throttle_and_digest`, `test_cap_never_suppresses_critical`, `test_failed_critical_is_retried`, `test_telegram_errors_never_contain_token` |
 | Kill switch blocks new entries immediately | `test_kill_on_blocks_risk_engine_immediately` (next evaluation rejected, `RESUME` required), `test_ack_command_is_consumed_by_engine_switch`, `test_risk_engine_reads_the_files_the_dashboard_writes` |
 | Daily report includes the capital-usage metrics | `test_daily_report_capital_metrics` (hand-computed peak, cumulative DD, shadow capital, planning figure, DTE split); real run: `send_daily_report.py` on `20261126-190221_rules_v1` |
+
+## Phase 9 — integrated paper trading (rule-only) + the Phase 7 label pipeline (v1.3 §6.3, §12, §17)
+
+| Piece | Where |
+|---|---|
+| `StreamEngine`: push-driven twin of the backtest replay (same ordering rules: quote < timer < bar at equal times; late events clamped and counted). Proven equal to `ReplayEngine` on all 59 history sessions (identical audit chains) | `app/engine/stream.py` |
+| `PaperSession`: one trading day. Every input (quote, final bar, clock tick, kill-switch change, operator command) is written to a write-ahead journal, then applied to the production DecisionPipeline / RiskEngine / PaperBroker. The risk engine's kill switch is in-memory and driven only by journaled records (the real kill-switch file and command inbox are polled before every bar and tick), so recovery replays kill-switch effects exactly, and a manual kill still blocks the very next decision. Feed-outage watchdog (no option quote for 30 s in market hours, pre-open quiet excluded) → automatic kill switch. Indicator warm-up from the previous 10 sessions (stored in the journal's start record). Consecutive-loss latch carried to the next session; reset only by an audited operator command in a later session | `app/engine/session.py`, `app/engine/journal.py` |
+| Restart / recovery (§12.3): an unfinished journal blocks the engine until `--recover --actor NAME`; the journal is replayed into a fresh engine and verified against its checkpoints (audit head every 2,000 events); a mismatch trips the automatic kill switch (`RISK_STATE_INCONSISTENT`) and opens a critical incident. Torn last line from a crash is ignored | `PaperSession.recover` |
+| Closeout every session: day closed, every candidate labelled, reconciliation (audit chain; each trade's quantities, prices and P&L re-derived from audit fills; charges recomputed from the fee schedule per order; peak capital re-derived from the audit fill sequence), persistence (trades, audit, capital usage, signals, risk events, labels, `PaperSessions`), journal gzip, daily P&L report, carry file | `app/engine/closeout.py` |
+| Live wiring: the market-data recorder keeps the only Dhan connection and hands every feed batch to the engine in the same process (`Recorder.taps`); `LiveAdapter` builds 5-level-depth option quotes and final index / futures bars (a quiet feed's bar is closed by the clock) | `app/engine/feeds.py`, `app/data/recorder.py` |
+| **Candidate labels (Phase 7 track)**: for every APPROVED and risk-REJECTED candidate and horizons 5 / 10 / 15 / 30 min, a fresh PaperBroker opens one lot of the selected contract at the decision time with the candidate's stop / target → TARGET_FIRST / STOP_FIRST / TIMEOUT (bid-side exit net of charges), NO_ENTRY or UNLABELLABLE. Same fill model and fees as paper trading; decision-time features only; `session_date` is the grouping key; `traded=0` marks counterfactuals; history-tier labels never count toward the 500 prospective labels | `app/labels/labeller.py`, `TradeLabels` (schema v7) |
+| Dashboard: paper-engine sessions (status, restarts, reconciliation, unresolved incidents) on Paper trades; label counts on Backtests & research | `app/dashboard/` |
+
+```
+.venv\Scripts\python scripts\run_paper.py live                         # each trading day (starts the recorder too)
+.venv\Scripts\python scripts\run_paper.py live --recover --actor NAME  # after a crash / forced restart
+.venv\Scripts\python scripts\run_paper.py status                       # sessions + 30-session operational streak
+.venv\Scripts\python scripts\run_paper.py resolve --run-id paper_rules_v1 --date D --actor NAME --note "..."
+.venv\Scripts\python scripts\run_paper.py labels                       # label counts + training readiness
+.venv\Scripts\python scripts\run_paper.py replay [--from D] [--to D]    # history pushed through the engine "as live"
+```
+
+Configuration: `config/paper.yaml` (run id, strategies, thresholds). **Futures are not required** in paper
+(`require_futures: false`): the research that justified ORB / pullback ran without futures and the futures
+indicators are still DRAFT; switch it on only after they are validated on recorded feed data and approved.
+Journals live under `data/paper/<run>/` (gitignored; gzip after closeout).
+
+Replay rehearsal on all 59 history sessions (`replay_paper_rules_v1`, research DB): every session reconciled;
+52 clean; 7 with a FEED_OUTAGE incident where the PG history has gaps of 2+ minutes (the watchdog doing its job,
+relaxed to 120 s for 10–15 s snapshot data). With the watchdog off and 10-session warm-up, the paper engine
+reproduces the Phase 5 backtest trade for trade except 2026-10-07, where the RBI blackout added in Phase 6
+blocks one entry. Labels: 194 candidates × 4 horizons (history tier — pipeline exercise only; 0 of the 500
+prospective labels).
+
+Not yet exercised: a live market session (the market was closed when this was built). The first `run_paper.py
+live` day is the real test of the adapter, the watchdog thresholds and the journal size with depth data.
+
+### Phase 9 acceptance checklist
+
+| Criterion | Evidence |
+|---|---|
+| 30 consecutive sessions without unresolved critical incidents | Operational: `run_paper.py status` counts the streak from `PaperSessions`; incidents are raised by the engine (`FEED_OUTAGE`, `RECOVERY_MISMATCH`) and resolved with `run_paper.py resolve`. `test_incident_resolution`. **Needs 30 live sessions.** |
+| State recovers after forced restart | `test_forced_restart_recovers_identical_state` (crash early, with a position open, late → identical trades and audit chain), `test_torn_journal_tail_is_ignored`, `test_tampered_journal_is_detected_and_blocks_entries`, `test_completed_journal_cannot_be_recovered`, `test_warmup_is_journaled_and_used_on_recovery` |
+| Paper fills and audit reconcile | `test_closeout_reconciles_and_persists`, `test_reconcile_detects_tampered_trade`; every replay session reconciled |
+| Capital-usage figures reconcile to fills and charges every session | `capital_reconciles` / `charges_match_fee_schedule` in every closeout; same tests |
+| Same code as backtest | `test_stream_engine_equals_replay_engine`, `test_clock_ticks_do_not_change_results`, `test_real_history_paper_engine_equals_backtest` |
+| Kill switch / operator commands | `test_manual_kill_is_journaled_blocks_next_decision_and_replays`, `test_ack_and_latch_reset_commands_are_consumed_and_journaled`, `test_latch_reset_in_same_session_is_refused`, `test_feed_outage_watchdog` |
+| Labels (Phase 7 data track) | `test_every_candidate_is_labelled_including_counterfactuals`, `test_label_matches_broker_trade_when_exits_coincide`, `test_labels_without_contract_or_after_close`, `test_adequacy_counts_only_prospective_labels` |
 
 ## Single-writer note
 

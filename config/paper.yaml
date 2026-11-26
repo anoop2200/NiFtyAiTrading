@@ -1,0 +1,14 @@
+# Phase 9 paper engine (rule-only). Read at engine start; changes take effect at the next session.
+version: paper-1.0.0
+run_id: paper_rules_v1            # one continuous paper run; each session appends to it
+strategies: [orb, pullback]
+# The research that justified these strategies ran without futures (PG history has none) and the futures
+# indicators (fut_rel_volume, vwap) are still DRAFT, so paper validates exactly the researched rules.
+# Switch to true only after the futures indicators are validated on recorded feed data and approved.
+require_futures: false
+feed_liveness_s: 3.0              # no quote anywhere for this long -> entries refused (risk check)
+selection_quote_age_s: 30.0       # contract ranking ignores quotes older than this
+feed_outage_s: 30.0               # no option quote for this long in market hours -> AUTOMATIC kill switch
+tick_s: 1.0                       # engine clock tick (timers, bar close on a quiet feed, watchdog)
+checkpoint_every: 2000            # journal checkpoint (audit head) every N applied events
+operational_run_sessions: 30      # §17 phase 9 acceptance: consecutive sessions without unresolved critical incidents

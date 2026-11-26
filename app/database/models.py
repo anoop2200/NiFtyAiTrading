@@ -7,7 +7,7 @@ from __future__ import annotations
 from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 SCHEMA_DESCRIPTIONS = {
     1: "Phase 1: instruments, sessions, events, historical imports",
     2: "Phase 2: derived bar builds and daily data-quality matrix",
@@ -15,6 +15,7 @@ SCHEMA_DESCRIPTIONS = {
     4: "Phase 4: paper trades, paper trade events (audit) and capital usage",
     5: "Phase 5: trading signals (candidates + risk decisions) and risk events",
     6: "Phase 6: experiments, experiment results, strategy trial counter, hold-outs and hold-out access log",
+    7: "Phase 9: paper-engine sessions and candidate trade labels (Phase 7 track)",
 }
 
 
@@ -361,3 +362,61 @@ class HoldoutAccessLog(Base):
     at: Mapped[str] = mapped_column(String(40))
     granted: Mapped[int] = mapped_column(Integer)
     reason: Mapped[str | None] = mapped_column(Text)
+
+
+class PaperSessions(Base):
+    """One paper-engine session: lifecycle, journal, recovery and reconciliation (v7, Phase 9)."""
+    __tablename__ = "PaperSessions"
+    __table_args__ = (UniqueConstraint("run_id", "session_date"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(60), index=True)
+    session_date: Mapped[str] = mapped_column(String(10), index=True)
+    source: Mapped[str] = mapped_column(String(40))                # live_feed / replay:<dataset>
+    started_at: Mapped[str] = mapped_column(String(40))
+    ended_at: Mapped[str | None] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(20))                # RUNNING / COMPLETED / FAILED / RECOVERED
+    restarts: Mapped[int] = mapped_column(Integer, default=0)
+    journal_path: Mapped[str] = mapped_column(Text)
+    journal_events: Mapped[int] = mapped_column(Integer, default=0)
+    journal_sha256: Mapped[str | None] = mapped_column(String(64))
+    audit_head: Mapped[str | None] = mapped_column(String(64))
+    reconciliation: Mapped[str | None] = mapped_column(Text)       # JSON: audit/fills/capital checks
+    incidents: Mapped[str | None] = mapped_column(Text)            # JSON list
+    code_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    risk_config_version: Mapped[str | None] = mapped_column(String(40))
+
+
+class TradeLabels(Base):
+    """Meta-labels for every strategy candidate (v1.3 §6.3): first barrier in option-premium space within a
+    holding horizon, for traded AND risk-rejected (counterfactual) candidates (v7)."""
+    __tablename__ = "TradeLabels"
+    __table_args__ = (UniqueConstraint("run_id", "session_date", "signal_seq", "horizon_min"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(60), index=True)
+    session_date: Mapped[str] = mapped_column(String(10), index=True)   # grouping key for CV (no day overlap)
+    signal_seq: Mapped[int] = mapped_column(Integer)
+    signal_ts: Mapped[str] = mapped_column(String(40))
+    strategy_id: Mapped[str] = mapped_column(String(40), index=True)
+    cycle_key: Mapped[str | None] = mapped_column(String(120))
+    direction: Mapped[int | None] = mapped_column(Integer)
+    signal_outcome: Mapped[str] = mapped_column(String(20))             # APPROVED / REJECTED
+    reject_reasons: Mapped[str] = mapped_column(Text)                   # JSON list
+    traded: Mapped[int] = mapped_column(Integer)                        # 0 = counterfactual
+    contract: Mapped[str | None] = mapped_column(String(60))
+    dte: Mapped[int | None] = mapped_column(Integer)
+    horizon_min: Mapped[int] = mapped_column(Integer)
+    stop_pct: Mapped[float | None] = mapped_column(Float)
+    target_pct: Mapped[float | None] = mapped_column(Float)
+    label: Mapped[str] = mapped_column(String(20), index=True)          # TARGET_FIRST / STOP_FIRST / TIMEOUT / NO_ENTRY / UNLABELLABLE
+    label_reason: Mapped[str | None] = mapped_column(String(80))
+    entry_ts: Mapped[str | None] = mapped_column(String(40))
+    entry_px: Mapped[float | None] = mapped_column(Float)
+    exit_ts: Mapped[str | None] = mapped_column(String(40))
+    exit_px: Mapped[float | None] = mapped_column(Float)
+    gross_pnl_per_lot: Mapped[float | None] = mapped_column(Float)
+    charges_per_lot: Mapped[float | None] = mapped_column(Float)
+    net_pnl_per_lot: Mapped[float | None] = mapped_column(Float)
+    r_multiple: Mapped[float | None] = mapped_column(Float)
+    features: Mapped[str] = mapped_column(Text)                         # JSON, decision-time only
+    data_tier: Mapped[str] = mapped_column(String(60))                  # prospective (live feed) vs history
+    label_version: Mapped[str] = mapped_column(String(20))

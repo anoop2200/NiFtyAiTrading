@@ -90,6 +90,22 @@ def breakdown(tr: pd.DataFrame, by: str) -> pd.DataFrame:
                          "avg_r": t.groupby(by)["r_multiple"].mean().round(3)}).reset_index()
 
 
+def paper_sessions(engine: Engine) -> pd.DataFrame:
+    try:
+        return q(engine, """SELECT session_date, run_id, source, status, restarts, journal_events, audit_head,
+                                   reconciliation, incidents FROM PaperSessions ORDER BY session_date DESC, run_id""")
+    except Exception:  # noqa: BLE001 - table appears with schema v7 (first paper-engine start)
+        return pd.DataFrame()
+
+
+def label_summary(engine: Engine) -> pd.DataFrame:
+    try:
+        return q(engine, """SELECT data_tier, horizon_min, label, COUNT(*) AS n, SUM(traded) AS traded
+                            FROM TradeLabels GROUP BY data_tier, horizon_min, label ORDER BY 1, 2, 3""")
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame()
+
+
 # ---------------------------------------------------------------------------------------------- research
 def experiments(engine: Engine) -> pd.DataFrame:
     return q(engine, """SELECT id, name, status, verdict, actor, started_at, finished_at, variants_tested, trials_total,
