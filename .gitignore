@@ -28,3 +28,6 @@ logs/
 data/experiments/
 data/paper/
 data/models/
+
+# project-local base interpreter for .venv (see README Setup)
+.python/

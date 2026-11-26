@@ -23,11 +23,16 @@ Design baseline: `NiftyTradingAI_v1.3_Revised_Architecture.docx`. Paper trading 
 ## Setup
 
 ```powershell
-py -V:Astral/CPython3.12.13 -m venv .venv      # already done
+py -V:Astral/CPython3.12.13 -m venv .venv      # already done (base interpreter: see note below)
 .venv\Scripts\python -m pip install -r requirements.txt
 copy .env.example .env                          # then fill in values, or use set_secret.py
 .venv\Scripts\python -m pytest -q
 ```
+
+**Base interpreter:** `.venv` runs on a project-local copy of CPython 3.12.13 in `.python\` (git-ignored;
+`.venv\pyvenv.cfg` `home` points there). The original uv install was made from inside the Claude desktop app,
+whose AppData is virtualised and invisible to a normal shell ("No Python at ..."). If `.python\` is lost:
+install CPython 3.12.13 anywhere visible and set `home`/`executable` in `.venv\pyvenv.cfg` to it.
 
 Secrets are looked up in `.env` first, then Windows Credential Manager (service `NiftyTradingAI`):
 

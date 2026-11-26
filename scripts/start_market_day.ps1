@@ -22,11 +22,18 @@ $env:PYTHONIOENCODING = "utf-8"
 $logDir = Join-Path $root "data\logs"
 New-Item -ItemType Directory -Force $logDir | Out-Null
 
+# the venv must start at all (its base interpreter lives in .python\, see README Setup)
+& $py -c "import sys" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Python in .venv does not start (exit $LASTEXITCODE). Check .venv\pyvenv.cfg 'home' points to an existing python folder." -ForegroundColor Red
+    exit 2
+}
+
 if (-not $SkipPreflight) {
     & $py scripts\preflight.py --fix
     $code = $LASTEXITCODE
-    if ($code -eq 2) {
-        Write-Host "`nPre-flight FAILED - fix the [FAIL] lines above, then re-run." -ForegroundColor Red
+    if ($code -ne 0 -and $code -ne 1) {        # 2 = a check failed; anything else = pre-flight itself crashed
+        Write-Host "`nPre-flight FAILED (exit $code) - fix the [FAIL] lines above, then re-run." -ForegroundColor Red
         exit 2
     }
     if ($code -eq 1) { Write-Host "`nPre-flight has warnings (see above)." -ForegroundColor Yellow }
