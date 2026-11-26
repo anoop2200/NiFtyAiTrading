@@ -42,6 +42,10 @@ The Dhan access token is valid for 24 hours: renew it each morning before 09:00.
 Paper only: no order API is ever called. The engine (`run_paper.py live`) records the feed itself, so never run
 `record_session.py` at the same time (single-writer rule).
 
+**Double-click launchers** (project root): `start_trading_day.bat` = the morning start below (`start_trading_day.bat
+check` = pre-flight only, `start_trading_day.bat recover NAME` = restart after a crash); `dashboard.bat` = dashboard
+only, opens http://127.0.0.1:8501.
+
 **Evening before** (after 15:30): `powershell -ExecutionPolicy Bypass -File scripts\start_market_day.ps1 -PreflightOnly`
 — runs `scripts\preflight.py --fix`: calendar, journal, kill switch, disk, Telegram, DB backup (made now), clock vs
 NTP, Dhan token + its expiry time, instrument master (lot, VIX row), NIFTY LTP, and the 20 prior NIFTY sessions the

@@ -40,6 +40,8 @@ if (-not $NoDashboard) {
             "--server.headless", "true", "--server.address", "127.0.0.1", "--server.port", "8501" `
             -WorkingDirectory $root -WindowStyle Minimized
         Write-Host "dashboard: http://127.0.0.1:8501"
+        Start-Sleep -Seconds 4
+        Start-Process "http://127.0.0.1:8501"
     } else {
         Write-Host "dashboard already running: http://127.0.0.1:8501"
     }
