@@ -7,10 +7,11 @@ from __future__ import annotations
 from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA_DESCRIPTIONS = {
     1: "Phase 1: instruments, sessions, events, historical imports",
     2: "Phase 2: derived bar builds and daily data-quality matrix",
+    3: "Phase 3: indicator definitions (registry) and indicator runs",
 }
 
 
@@ -140,3 +141,38 @@ class DataQualityDaily(Base):
     mean_spread: Mapped[float | None] = mapped_column(Float)
     bars: Mapped[int | None] = mapped_column(Integer)
     bar_coverage_pct: Mapped[float | None] = mapped_column(Float)
+
+
+class IndicatorDefinitions(Base):
+    """Indicator registry (v1.3 §5.4). One row per (indicator_id, version); approval is explicit (v3)."""
+    __tablename__ = "IndicatorDefinitions"
+    __table_args__ = (UniqueConstraint("indicator_id", "version"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    indicator_id: Mapped[str] = mapped_column(String(60), index=True)
+    version: Mapped[str] = mapped_column(String(20))
+    name: Mapped[str] = mapped_column(String(120))
+    family: Mapped[str] = mapped_column(String(30))
+    code_ref: Mapped[str] = mapped_column(Text)
+    code_sha256: Mapped[str] = mapped_column(String(64))
+    spec: Mapped[str] = mapped_column(Text)                      # JSON: full contract + defaults
+    status: Mapped[str] = mapped_column(String(12))              # DRAFT / VALIDATED / APPROVED / RETIRED
+    experiment_id: Mapped[str | None] = mapped_column(String(60))
+    validation: Mapped[str | None] = mapped_column(Text)         # JSON validation report
+    created_at: Mapped[str] = mapped_column(String(40))
+    updated_at: Mapped[str] = mapped_column(String(40))
+
+
+class IndicatorRuns(Base):
+    """One row per indicator computation run over a dataset (values themselves live in Parquet) (v3)."""
+    __tablename__ = "IndicatorRuns"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_at: Mapped[str] = mapped_column(String(40))
+    dataset: Mapped[str] = mapped_column(String(60))
+    date_from: Mapped[str] = mapped_column(String(10))
+    date_to: Mapped[str] = mapped_column(String(10))
+    bindings: Mapped[str] = mapped_column(Text)                  # JSON list of binding keys
+    skipped: Mapped[str] = mapped_column(Text, default="{}")     # JSON binding -> reason (source requirements)
+    output_path: Mapped[str] = mapped_column(Text)
+    output_sha256: Mapped[str] = mapped_column(String(64))
+    output_hash: Mapped[str] = mapped_column(String(64))         # content hash for deterministic replay
+    checks: Mapped[str] = mapped_column(Text)                    # JSON: batch=stream, replay, restart results

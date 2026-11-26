@@ -1,4 +1,4 @@
-# NiftyTradingAI — Phase 1 (foundation + data recorder) and Phase 2 (market data layer)
+# NiftyTradingAI — Phase 1 (foundation + data recorder) Phase 2 (market data layer) and Phase 3 (indicator framework)
 
 Design baseline: `NiftyTradingAI_v1.3_Revised_Architecture.docx`. Paper trading only; no order APIs exist in this code.
 
@@ -133,6 +133,53 @@ within tolerance. Report: `data/reports/history_bars_summary.json`.
 
 Still open: feed-bar reconciliation needs one recorded live day (same day as Phase 1 acceptance); the 2027 holiday
 file must be added once NSE publishes it; Muhurat timings are unconfirmed; OI-07 event source.
+
+## Phase 3 — indicator framework (v1.3 §5, §4.4)
+
+| Piece | Where |
+|---|---|
+| Indicator contract (id, semantic version, formula, source requirement, outputs, units, warm-up, max input age, missing-data rule, recovery method, dependencies) + standard states | `app/indicators/base.py` |
+| 19 indicators: EMA, SMA, RSI, ATR, Bollinger, ROC, session VWAP, opening range (conventional); KAMA, ADX, realized vol, vol compression, confirmed swing pivots, futures relative volume, Market Strength composite (custom); PCR, ATM IV, CE/PE premium pressure, OI buildup (options) | `app/indicators/conventional.py`, `custom.py`, `options.py` |
+| Single BSM pricing / IV / Greeks implementation with versioned assumptions (r 6.5%, q 1.2%, T = calendar seconds to 15:30) | `app/pricing/bs.py` |
+| Engine: N-minute resampler (emits only completed bars), source-requirement checks, streaming replay, JSON checkpoint/restore, warm-up | `app/indicators/engine.py` |
+| Chain stream (nearest expiry, ATM band, last snapshot per minute) | `app/indicators/chain.py` |
+| Registry: code registry + `IndicatorDefinitions` (DRAFT → VALIDATED → APPROVED → RETIRED), `IndicatorRuns`; schema v3 | `app/indicators/registry.py` |
+| Bindings config | `config/indicators.yaml` |
+
+```
+.venv\Scripts\python scripts\validate_indicators.py              # acceptance checks -> VALIDATED + report
+.venv\Scripts\python scripts\compute_indicators.py --verify-replay  # all history -> data/derived/indicators/
+.venv\Scripts\python scripts\set_indicator_status.py --list
+.venv\Scripts\python scripts\set_indicator_status.py ema 1.0.0 APPROVED --actor <name> --note "..."
+```
+
+Rules enforced in code:
+- Indicators see only final bars; a 5-minute indicator gets a bar only when its last minute is in.
+- Missing required input → invalid output and NO_SIGNAL (fail safe), state untouched.
+- Intraday data gap > `max_input_age_s` resets state; overnight gaps do not; session-anchored indicators
+  (VWAP, opening range) reset each session.
+- Bindings whose declared source the dataset cannot satisfy are skipped and logged (futures VWAP / relative
+  volume on index-only history; index volume is never used as participation).
+- Approval is a human, audited action and needs a passed validation report. An APPROVED definition whose
+  code changes is refused until `SPEC.version` is bumped; a VALIDATED one falls back to DRAFT.
+
+### Phase 3 acceptance checklist
+
+| Criterion | Evidence |
+|---|---|
+| Batch and streaming outputs match within tolerance | `validation.batch_vs_stream` (rel 1e-9 / abs 1e-7); EMA, SMA, RSI, ATR, Bollinger, ROC, VWAP have an independent vectorised implementation; the others' batch path is the streaming loop |
+| Deterministic replay | `compute_indicators.py --verify-replay`: 59 days, 20 bindings, 352k rows, identical output hash on two runs |
+| No-lookahead tests | perturb every bar after a cut; outputs before it must not change (`tests/test_indicators.py`, incl. a deliberately leaky indicator that the check catches) |
+| Restart warm-up test | JSON snapshot restore = uninterrupted run (incl. engine with a half-built 5-minute bar); replay warm-up for `recovery: replay` indicators |
+
+`validate_indicators.py` on the last 10 history days: all 19 pass (17 on real history; futures VWAP and
+relative volume on a labelled synthetic stream, so they cannot be approved until real futures data exists).
+
+**IV check vs provider IV in optionchain_db** (ATM, last 10 days): with 1+ days to expiry our IV is within
+~0.35 (PE) / ~1.1 (CE) vol points of the provider. On expiry day (0DTE) ours is ~12 vol points higher: the
+provider evidently uses a different time-to-expiry convention. This matters because expiry days are traded —
+**open item**: decide the 0DTE time convention (calendar seconds vs trading-time / variance-time) and stress-test
+the r/q assumptions before any IV-based rule is approved.
 
 ## Single-writer note
 

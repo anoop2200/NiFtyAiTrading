@@ -1,0 +1,27 @@
+# Indicator bindings computed by scripts/compute_indicators.py (v1.3 §5). Versioned; change via commit.
+# stream: index | future | option | chain ; tf_min: bar timeframe in minutes ; params override DEFAULTS.
+# Bindings whose source requirement the dataset cannot satisfy are skipped and logged (e.g. futures
+# participation indicators on index-only history).
+bindings:
+  - {id: ema, stream: index, tf_min: 1, params: {period: 9}}
+  - {id: ema, stream: index, tf_min: 1, params: {period: 21}}
+  - {id: ema, stream: index, tf_min: 5, params: {period: 21}}
+  - {id: rsi, stream: index, tf_min: 1}
+  - {id: rsi, stream: index, tf_min: 5}
+  - {id: atr, stream: index, tf_min: 1}
+  - {id: atr, stream: index, tf_min: 5}
+  - {id: bbands, stream: index, tf_min: 1}
+  - {id: roc, stream: index, tf_min: 1}
+  - {id: kama, stream: index, tf_min: 1}
+  - {id: adx, stream: index, tf_min: 1}
+  - {id: adx, stream: index, tf_min: 5}
+  - {id: realized_vol, stream: index, tf_min: 1}
+  - {id: vol_compression, stream: index, tf_min: 1}
+  - {id: swing_pivots, stream: index, tf_min: 5}
+  - {id: opening_range, stream: index, tf_min: 1, params: {minutes: 15}}
+  - {id: market_strength, stream: index, tf_min: 1}
+  - {id: pcr, stream: chain, tf_min: 1}
+  - {id: atm_iv, stream: chain, tf_min: 1}
+  - {id: premium_pressure, stream: chain, tf_min: 1}
+  - {id: vwap, stream: future, tf_min: 1}
+  - {id: fut_rel_volume, stream: future, tf_min: 1}
