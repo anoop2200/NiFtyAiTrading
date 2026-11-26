@@ -110,5 +110,12 @@ class RiskConfig:
                 r = tpl.get(k)
                 if not (isinstance(r, list) and len(r) == 2 and 0 < r[0] <= r[1] < 100):
                     raise RiskConfigError(f"{name}.{k} must be [lo, hi] with 0 < lo <= hi < 100")
+        # fields editable from the dashboard (Phase 8) get explicit bounds too
+        if d["zero_dte"]["max_entries"] < 0:
+            raise RiskConfigError("zero_dte.max_entries must be >= 0")
+        if d["limits"]["cooldown_after_stop_min"] < 0:
+            raise RiskConfigError("limits.cooldown_after_stop_min must be >= 0")
+        if parse_hhmm(d["zero_dte"]["last_entry"]) > parse_hhmm(d["windows"]["last_entry"]):
+            raise RiskConfigError("zero_dte.last_entry cannot be after windows.last_entry")
         if d["zero_dte"]["max_entries"] > d["limits"]["max_entries_per_day"]:
             raise RiskConfigError("zero_dte.max_entries cannot exceed limits.max_entries_per_day")

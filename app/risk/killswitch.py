@@ -27,10 +27,12 @@ class KillSwitch:
     emergency_close: bool = False
     auto: dict | None = None            # {"reason", "detail", "at", "acked_by"}
     history: list[dict] = field(default_factory=list)
+    inbox: Path | None = None           # operator command directory (data/runtime/commands)
 
     # ---- manual ----------------------------------------------------------------------------------
     def refresh(self) -> None:
         """Pick up changes made by other processes (dashboard / console)."""
+        self._consume_commands()
         if self.state_file and Path(self.state_file).exists():
             try:
                 d = json.loads(Path(self.state_file).read_text(encoding="utf-8"))
@@ -66,6 +68,21 @@ class KillSwitch:
             raise PermissionError("acknowledgement needs an operator name")
         self.auto["acked_by"] = actor
         self.history.append({"at": iso(), "event": "auto_ack", "actor": actor, "reason": self.auto["reason"]})
+
+    def _consume_commands(self) -> None:
+        """Apply operator commands posted by the dashboard / console (app.control.actions). Only the engine
+        that owns this switch clears its automatic latch; processed commands are renamed *.done."""
+        if not self.inbox or not Path(self.inbox).exists():
+            return
+        for f in sorted(Path(self.inbox).glob("*.json")):
+            try:
+                cmd = json.loads(f.read_text(encoding="utf-8"))
+                if cmd.get("command") == "ack_auto" and cmd.get("actor"):
+                    self.acknowledge(cmd["actor"])
+                    self.history.append({"at": iso(), "event": "command_applied", "command": cmd, "file": f.name})
+                os.replace(f, f.with_suffix(".done"))
+            except (OSError, ValueError):
+                continue   # a half-written or unreadable command is retried on the next refresh
 
     # ---- status ----------------------------------------------------------------------------------
     def blocking_reason(self) -> str | None:

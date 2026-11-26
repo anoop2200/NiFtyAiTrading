@@ -100,7 +100,7 @@ class RiskEngine:
         if self.cfg is not None:
             from app.config import PROJECT_ROOT
             state_file = PROJECT_ROOT / self.cfg["kill_switch"]["manual_state_file"]
-        self.kill = kill or KillSwitch(state_file)
+        self.kill = kill or KillSwitch(state_file, inbox=state_file.parent / "commands" if state_file else None)
         self.state = RiskState()
 
     # ------------------------------------------------------------------ session lifecycle

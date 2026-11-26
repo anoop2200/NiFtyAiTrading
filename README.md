@@ -1,4 +1,4 @@
-# NiftyTradingAI — Phase 1 (foundation + data recorder) Phase 2 (market data layer), Phase 3 (indicator framework), Phase 4 (backtester + paper broker), Phase 5 (rule strategies + risk) and Phase 6 (experiment tracking)
+# NiftyTradingAI — Phase 1 (foundation + data recorder) Phase 2 (market data layer), Phase 3 (indicator framework), Phase 4 (backtester + paper broker), Phase 5 (rule strategies + risk), Phase 6 (experiment tracking) and Phase 8 (dashboard + alerts)
 
 Design baseline: `NiftyTradingAI_v1.3_Revised_Architecture.docx`. Paper trading only; no order APIs exist in this code.
 
@@ -312,7 +312,45 @@ operator decision on 2026-11-26** (recorded in `HoldoutAccessLog`). All 59 histo
 data. History is the snapshot tier, which cannot meet the observed-feed promotion gate anyway. The next hold-out
 forms automatically from live-recorded sessions after 2026-11-25, once at least 20 of them exist.
 
+## Phase 8 — dashboard, kill switch, alerts, daily report (v1.3 §14, §9.5, §9.7)
+
+Phase 7 (ML) is optional and was skipped: no rule strategy has passed the research screen yet.
+
+| Piece | Where |
+|---|---|
+| Streamlit dashboard, localhost only: Home/health (state, recorder, clock, CPU/memory, events, operator-log integrity), Market monitor (history chain ATM±5, quote age, quality flags), Signals, Paper trades + capital usage, Performance (equity/drawdown, expectancy, PF, R distribution, hour / DTE / strategy / exit breakdowns, daily report), Backtests & research, Config & kill switch | `app/dashboard/ui.py`, `.streamlit/config.toml` |
+| Read-only data access: every DB opened with SQLite `mode=ro` | `app/dashboard/data.py`, `make_ro_engine` in `app/database/db.py` |
+| Audited operator actions: hash-chained `data/runtime/operator_actions.jsonl` (name + reason required); kill switch on/off (`RESUME` to turn off), optional emergency close; acknowledgement of an automatic trip via a command file the engine consumes; whitelisted risk-config edits (`APPLY` to confirm), checked by the engine's own validator, version bumped, comments kept, effective at the next session start | `app/control/actions.py`, `app/risk/killswitch.py` |
+| Telegram: CRITICAL / WARNING / INFO, dedup keys, per-kind throttles, daily cap on non-critical messages, digest of what was held back, failed CRITICAL retried; token never logged. Without `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` it writes `data/runtime/telegram_outbox.jsonl` | `app/notify/telegram.py` |
+| Daily P&L report (§14.2 + §9.7): net/gross/charges, win/loss/timeout counts, R total, session peak capital with time and open trades, peak over the last 20 sessions and since inception, intraday and cumulative max drawdown, largest trade R, shadow capital (0.50% and 0.25% 0DTE rules), live-capital **planning estimate**, DTE breakdown on expiry days | `app/reports/daily.py` |
+
+```
+.venv\Scripts\python -m streamlit run app\dashboard\ui.py            # http://127.0.0.1:8501
+.venv\Scripts\python scripts\kill_switch.py status
+.venv\Scripts\python scripts\kill_switch.py on  --actor NAME --reason "..." [--emergency-close]
+.venv\Scripts\python scripts\kill_switch.py off --actor NAME --reason "..." --confirm RESUME
+.venv\Scripts\python scripts\kill_switch.py ack --actor NAME --reason "..."
+.venv\Scripts\python scripts\kill_switch.py log
+.venv\Scripts\python scripts\send_daily_report.py [--db main] [--run-id ID] [--date YYYY-MM-DD] [--send]
+.venv\Scripts\python scripts\set_secret.py TELEGRAM_BOT_TOKEN      # and TELEGRAM_CHAT_ID, to send for real
+```
+
+Until Phase 9 runs the live paper engine, the dashboard and report read the backtest runs in the research DB, and
+the market monitor shows the imported history chain (labelled as such). The risk validator now also bounds the
+UI-editable fields (`zero_dte.max_entries >= 0`, `cooldown_after_stop_min >= 0`, 0DTE last entry no later than
+the general last entry).
+
+### Phase 8 acceptance checklist
+
+| Criterion | Evidence |
+|---|---|
+| UI read-only except audited config / kill actions | `test_read_only_engine_rejects_writes`, `test_dashboard_code_has_no_write_paths`, `test_operator_log_chain_and_tamper`, `test_operator_log_requires_actor_and_reason`, `test_config_change_*` (whitelist, validation, file untouched on refusal, comments kept, version bump) |
+| Notifications deduplicated | `test_dedup_and_throttle_and_digest`, `test_cap_never_suppresses_critical`, `test_failed_critical_is_retried`, `test_telegram_errors_never_contain_token` |
+| Kill switch blocks new entries immediately | `test_kill_on_blocks_risk_engine_immediately` (next evaluation rejected, `RESUME` required), `test_ack_command_is_consumed_by_engine_switch`, `test_risk_engine_reads_the_files_the_dashboard_writes` |
+| Daily report includes the capital-usage metrics | `test_daily_report_capital_metrics` (hand-computed peak, cumulative DD, shadow capital, planning figure, DTE split); real run: `send_daily_report.py` on `20261126-190221_rules_v1` |
+
 ## Single-writer note
 
 In Phase 1 the recorder and import scripts are the only writers to `NiftyTradingAI.db` (do not run the PG import
-while recording). From Phase 5 the trading-engine becomes the sole writer (v1.3 §12.1).
+while recording). From Phase 5 the trading-engine becomes the sole writer (v1.3 §12.1). The Phase 8 dashboard
+opens every database read-only and changes state only through the audited files in `data/runtime/`.

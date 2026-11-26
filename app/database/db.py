@@ -34,6 +34,18 @@ def make_engine(db_path: Path | str | None = None) -> Engine:
     return engine
 
 
+def make_ro_engine(db_path: Path | str | None = None) -> Engine:
+    """Read-only engine for the dashboard and reports (v1.3 §11 single writer): SQLite refuses every write."""
+    path = Path(db_path) if db_path else settings().path("database")
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return create_engine(f"sqlite:///file:{path.as_posix()}?mode=ro&uri=true", future=True)
+
+
+def research_db_path() -> Path:
+    return settings().path("database").with_name("NiftyTradingAI_research.db")
+
+
 def init_db(engine: Engine) -> None:
     Base.metadata.create_all(engine)
     with Session(engine) as s:
