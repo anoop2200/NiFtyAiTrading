@@ -1,0 +1,11 @@
+[project]
+name = "niftytradingai"
+version = "0.1.0"
+description = "NIFTY options paper-trading research platform (Phase 1: data recorder)"
+requires-python = ">=3.12,<3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+pythonpath = [".", "tests"]

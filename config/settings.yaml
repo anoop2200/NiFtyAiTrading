@@ -1,0 +1,52 @@
+# NiftyTradingAI — Phase 1 configuration (non-secret). Secrets live in .env / Credential Manager.
+timezone: Asia/Kolkata
+
+paths:
+  database: data/database/NiftyTradingAI.db
+  raw: data/raw
+  historical: data/historical
+  backups: data/backups
+  runtime: data/runtime
+  reports: data/reports
+  logs: logs
+
+dhan:
+  rest_base: https://api.dhan.co/v2
+  feed_url: wss://api-feed.dhan.co
+  instrument_master_url: https://images.dhan.co/api-data/api-scrip-master.csv
+  max_instruments_per_message: 100   # Dhan limit
+  max_instruments_per_connection: 5000
+  option_chain_min_interval_s: 3.2   # Dhan: 1 request / 3 s per underlying+expiry
+  market_quote_min_interval_s: 1.05  # Dhan: 1 request / s
+
+instrument:
+  name: NIFTY
+  index_symbol: NIFTY               # trading symbol of the index row in the master
+  option_symbol_prefix: "NIFTY-"    # excludes BANKNIFTY / NIFTYNXT50 etc.
+  index_security_id_override: null  # set only if master lookup fails
+  atm_strikes_each_side: 5
+  transition_buffer_strikes: 2      # extra strikes subscribed each side so ATM moves do not leave gaps
+  futures_months: 2                 # current + next month for roll handling
+
+session:
+  record_start: "09:00"
+  record_end: "15:35"
+  market_open: "09:15"
+  market_close: "15:30"
+
+recorder:
+  flush_rows: 5000
+  flush_seconds: 10
+  health_interval_s: 2
+  feed_liveness_s: 3                # v1.3 §4.3: connection-level liveness
+  reconnect_backoff_s: [1, 2, 5, 10, 20, 30]
+  option_chain_enabled: true
+  ntp_server: time.google.com
+  ntp_check_interval_s: 300
+
+historical_import:
+  table: filtered_option_data
+  symbol_filter: NIFTY              # rows whose "Symbol" matches (case-insensitive)
+  dataset: pg_filtered_option_data
+  data_tier: observed_top_of_book_snapshot
+  fetch_batch_rows: 20000

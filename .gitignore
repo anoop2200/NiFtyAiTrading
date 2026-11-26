@@ -1,0 +1,25 @@
+# Secrets — never commit
+.env
+*.env
+!.env.example
+secrets/
+
+# Environments
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Data and runtime output (large / account-specific)
+data/database/
+data/raw/
+data/historical/
+data/backups/
+data/temporary/
+data/runtime/
+data/reports/
+logs/
+*.db
+*.db-wal
+*.db-shm
+*.parquet
