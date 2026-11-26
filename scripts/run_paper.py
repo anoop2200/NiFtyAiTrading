@@ -25,6 +25,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import _bootstrap  # noqa: F401
+import pandas as pd
 import yaml
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -129,7 +130,13 @@ async def _live(a) -> int:
 
     cfg, pc = settings(), paper_cfg()
     setup_logging("trading-engine")
-    db = make_engine()
+    smoke = bool(a.smoke)
+    if smoke and not a.duration_min:
+        logger.error("--smoke needs --duration-min")
+        return 2
+    # --smoke: an isolated rehearsal (own run id, runtime dir, research DB, Telegram outbox) that can never touch
+    # the real run's journal, kill switch, risk carry or main database.
+    db = make_engine(research_db_path() if smoke else None)
     init_db(db)
     today = now_ist().date()
     day = today.isoformat()
@@ -137,9 +144,19 @@ async def _live(a) -> int:
     if not cal.is_trading_day(today):
         logger.error(f"{day} is not a trading session")
         return 2
-    run_id = pc["run_id"]
+    run_id = f"smoke_{pc['run_id']}" if smoke else pc["run_id"]
     jp = journal_path(run_id, day)
-    notifier = _notifier()
+    kill_file, commands, carry_file = KILL_FILE, COMMANDS, CARRY
+    if smoke:
+        from app.notify.telegram import Notifier, make_transport
+        rt = PROJECT_ROOT / "data" / "paper" / run_id / "_runtime"
+        kill_file, commands, carry_file = rt / "kill.json", rt / "commands", rt / "carry.json"
+        carry_file.unlink(missing_ok=True)
+        jp.unlink(missing_ok=True)
+        Path(str(jp) + ".gz").unlink(missing_ok=True)
+        notifier = Notifier(make_transport(outbox=rt / "telegram_outbox.jsonl"))
+    else:
+        notifier = _notifier()
     unfinished = jp.exists() and not any(r["k"] == "end" for r in Journal.read(jp))
     if Journal.closed(jp) or (jp.exists() and not unfinished):
         logger.error(f"session {day} of {run_id} already closed ({jp})")
@@ -158,20 +175,27 @@ async def _live(a) -> int:
         logger.error(f"implausible lot size {lot} from the instrument master")
         return 2
     future = p.universe.futures[0].security_id if p.universe.futures else None
+    hist = pd.DataFrame() if unfinished else await _index_history_live(cfg, cal, today, logger)
     if unfinished:
-        s = PaperSession.recover(jp, fees, cal, events, kill_file=KILL_FILE, commands=COMMANDS, carry_file=CARRY,
+        s = PaperSession.recover(jp, fees, cal, events, kill_file=kill_file, commands=commands, carry_file=carry_file,
                                  notifier=notifier)
         s._incident("OPERATOR_RECOVERY", {"actor": a.actor, "recovery": s.recovery}, notify=True)
         logger.warning(f"recovered {s.recovery}")
     else:
+        strategies = late_start_strategies(tuple(pc["strategies"]), now_ist())
+        if strategies != tuple(pc["strategies"]):
+            logger.warning(f"late start ({now_ist():%H:%M}): the 09:15-09:30 opening range cannot be observed, "
+                           f"so ORB is off today; running {strategies}")
         spec = SessionSpec(run_id=run_id, session=day, lot_size=int(lot), source="live_feed",
-                           data_label="observed_feed", mode="paper", strategies=tuple(pc["strategies"]),
+                           data_label="observed_feed", mode="paper", strategies=strategies,
                            overrides={"require_futures": bool(pc["require_futures"])},
-                           prior_daily=_prior_daily_live(cfg, day, p.universe.index.security_id),
+                           prior_daily=prior_daily(hist, day) if len(hist) else None,
                            feed_liveness_s=pc["feed_liveness_s"], selection_quote_age_s=pc["selection_quote_age_s"],
                            feed_outage_s=pc["feed_outage_s"], checkpoint_every=pc["checkpoint_every"])
-        s = PaperSession(spec, jp, fees, cal, events, kill_file=KILL_FILE, commands=COMMANDS, carry_file=CARRY,
-                         notifier=notifier)
+        s = PaperSession(spec, jp, fees, cal, events, kill_file=kill_file, commands=commands, carry_file=carry_file,
+                         notifier=notifier, warmup=warmup_bars(hist, day, pc.get("warmup_sessions", 10)) if len(hist)
+                         else None)
+        logger.info(f"indicator warm-up: {s.warmup_bars} index bars; prior days: {len(spec.prior_daily or [])}")
     open_session_row(db, s, code_fingerprint())
     adapter = LiveAdapter(s, today, p.universe.index.security_id, future, p.universe.options,
                           vix_id=p.universe.vix.security_id if p.universe.vix else None)
@@ -197,24 +221,36 @@ async def _live(a) -> int:
     return 0 if r["status"] == "COMPLETED" else 1
 
 
-def _prior_daily_live(cfg, day: str, index_id: int) -> list[dict]:
+def late_start_strategies(strategies: tuple, now) -> tuple:
+    """A fresh (non-recovery) start after 09:17 IST misses opening-range bars: ORB would see a partial or empty
+    range (the approved opening_range indicator assumes it saw the open), so it sits the day out."""
+    if (now.hour, now.minute) > (9, 17):
+        return tuple(x for x in strategies if x != "orb")
+    return strategies
+
+
+async def _index_history_live(cfg, cal, today, logger):
+    """The 20 sessions before today from the NIFTY 1-minute store, fetching any missing ones from Dhan first."""
     import pandas as pd
-    from app.indicators.datasets import pg_spot_stream
-    from app.marketdata.pipeline import history_days
-    days = [d for d in history_days(cfg.path("derived"), "pg_spot_bars_1m") if d < day]
-    rows = prior_daily(pg_spot_stream(cfg.path("derived"), days), day) if days else []
-    have = {r["session"] for r in rows}
-    feed_root = cfg.path("derived") / "feed_bars_1m"
-    for f in sorted(feed_root.glob("date=*/part-0.parquet")) if feed_root.exists() else []:
-        d = f.parent.name[5:]
-        if d >= day or d in have:
-            continue
-        b = pd.read_parquet(f)
-        b = b[b["security_id"] == index_id]
-        if len(b):
-            rows.append({"session": d, "high": float(b["high"].max()), "low": float(b["low"].min()),
-                         "close": float(b.sort_values("ts")["close"].iloc[-1])})
-    return sorted(rows, key=lambda r: r["session"])[-20:]
+    from app.data.dhan_rest import DhanRest
+    from app.engine import live_history as lh
+    from app.secrets import get_secret
+    root = cfg.path("historical")
+    want = lh.needed_sessions(cal, today, 20)
+    gaps = lh.missing(root, want)
+    if gaps:
+        rest = DhanRest(cfg.get("dhan.rest_base"), get_secret("DHAN_CLIENT_ID"), get_secret("DHAN_ACCESS_TOKEN"),
+                        cfg.get("dhan.option_chain_min_interval_s"), cfg.get("dhan.market_quote_min_interval_s"))
+        try:
+            logger.info(f"index history: fetching {gaps}: {await lh.fetch_missing(rest, root, gaps)}")
+        except Exception as e:  # noqa: BLE001 - a warm-up gap must not stop the session; it is reported
+            logger.error(f"index history fetch failed: {e!r}")
+        finally:
+            await rest.close()
+    hist = lh.index_frame(root, want)
+    info = lh.summary(want, hist)
+    (logger.warning if info["missing"] or lh.stale(cal, today, hist) else logger.info)(f"index history {info}")
+    return hist if len(hist) else pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------------------------- status / labels
@@ -267,6 +303,8 @@ def main() -> int:
     lv.add_argument("--duration-min", type=float)
     lv.add_argument("--no-chain", action="store_true")
     lv.add_argument("--spot", type=float)
+    lv.add_argument("--smoke", action="store_true",
+                    help="isolated rehearsal (run id smoke_*, research DB, outbox alerts); needs --duration-min")
     rp = sub.add_parser("replay")
     rp.add_argument("--from", dest="d_from")
     rp.add_argument("--to", dest="d_to")

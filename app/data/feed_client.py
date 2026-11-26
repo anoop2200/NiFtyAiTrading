@@ -118,6 +118,9 @@ class FeedClient:
                 done, _ = await asyncio.wait({recv_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
                 if stop_task in done:
                     recv_task.cancel()
+                    # the socket may already have failed (e.g. 1011 on disconnect): retrieve it so asyncio does not
+                    # print "Task exception was never retrieved" at shutdown
+                    recv_task.add_done_callback(lambda t: t.cancelled() or t.exception())
                     try:
                         await ws.send(json.dumps({"RequestCode": 12}))
                     except Exception:

@@ -37,17 +37,42 @@ Secrets are looked up in `.env` first, then Windows Credential Manager (service 
 
 The Dhan access token is valid for 24 hours: renew it each morning before 09:00.
 
-## Daily run
+## Daily run — live paper trading (market-day runbook)
 
-```powershell
-.venv\Scripts\python scripts\smoke_test.py --ws-seconds 30     # first time, and after any Dhan change
-.venv\Scripts\python scripts\record_session.py                  # start ~09:00, runs until 15:35 IST
-.venv\Scripts\python -m uvicorn app.api.main:app --host 127.0.0.1 --port 8765   # health view
-.venv\Scripts\python scripts\verify_session.py                  # after close
-.venv\Scripts\python scripts\backup_db.py
-```
+Paper only: no order API is ever called. The engine (`run_paper.py live`) records the feed itself, so never run
+`record_session.py` at the same time (single-writer rule).
 
-Short test run outside market hours: `record_session.py --duration-min 5` (the feed is quiet when the market is closed).
+**Evening before** (after 15:30): `powershell -ExecutionPolicy Bypass -File scripts\start_market_day.ps1 -PreflightOnly`
+— runs `scripts\preflight.py --fix`: calendar, journal, kill switch, disk, Telegram, DB backup (made now), clock vs
+NTP, Dhan token + its expiry time, instrument master (lot, VIX row), NIFTY LTP, and the 20 prior NIFTY sessions the
+engine warms its indicators on (fetched if missing). Exit 0 = OK, 1 = warnings, 2 = fix before starting.
+
+**Morning, 08:45–09:10 IST:**
+1. If pre-flight said the token expires before the session ends: after that expiry time, generate a new access
+   token on web.dhan.co and paste it into the `DHAN_ACCESS_TOKEN` line of `.env` (`.env` overrides Credential
+   Manager; if the key is not in `.env`, use `scripts\set_secret.py DHAN_ACCESS_TOKEN`).
+2. `powershell -ExecutionPolicy Bypass -File scripts\start_market_day.ps1` — pre-flight again (stops on a FAIL), the
+   dashboard at http://127.0.0.1:8501 (minimised window), then the engine in this window until 15:35 IST, with a
+   console copy in `data\logs\engine_console_*.log`. At the end it closes out, reconciles and sends the daily report.
+3. Watch the dashboard (Market monitor, Paper trading). Alerts go to Telegram.
+
+**During the day:**
+- Stop new entries: `.venv\Scripts\python scripts\kill_switch.py on --actor NAME --reason "..."`
+  (`--emergency-close` also flattens open paper positions); resume with
+  `kill_switch.py off --actor NAME --reason "..." --confirm RESUME`. An automatic trip (feed outage, risk error)
+  needs `kill_switch.py ack` before resuming.
+- Engine crashed or window closed: `start_market_day.ps1 -Recover -Actor NAME` — the journal is replayed and
+  verified before trading continues. A plain restart is refused while an unfinished journal exists.
+- A late fresh start (after 09:17 IST) is allowed: indicators warm up on the prior sessions, but the opening range
+  cannot be observed, so ORB is left out of that session (logged) and only pullback runs. Start before 09:15.
+
+**After the close:** `.venv\Scripts\python scripts\run_paper.py status`, `scripts\verify_session.py`,
+`scripts\backup_db.py`.
+
+**Rehearsal outside market hours** (never touches the real run's journal, kill switch, risk carry or main DB):
+`.venv\Scripts\python scripts\run_paper.py live --smoke --duration-min 3 --no-chain` — run id
+`smoke_paper_rules_v1`, research DB, alerts to `data\paper\smoke_paper_rules_v1\_runtime\telegram_outbox.jsonl`.
+API check: `scripts\smoke_test.py --ws-seconds 30`.
 
 ## Historical import from optionchain_db (read-only)
 
