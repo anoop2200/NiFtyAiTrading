@@ -18,8 +18,9 @@ TIER = "dhan_intraday_candles"
 COLUMNS = ["ts", "session", "open", "high", "low", "close", "complete"]
 
 
-def vix_path(historical_root: Path) -> Path:
-    return Path(historical_root) / "india_vix" / "india_vix_1m.parquet"
+def vix_path(historical_root: Path, name: str = "india_vix") -> Path:
+    """1-minute index bars of `name` (india_vix; nifty_index for the research-tier screen's spot history)."""
+    return Path(historical_root) / name / f"{name}_1m.parquet"
 
 
 def candles_to_bars(body, day: str) -> pd.DataFrame:
@@ -36,8 +37,8 @@ def candles_to_bars(body, day: str) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=COLUMNS)
 
 
-def load(historical_root: Path, days: list[str] | None = None) -> pd.DataFrame:
-    p = vix_path(historical_root)
+def load(historical_root: Path, days: list[str] | None = None, name: str = "india_vix") -> pd.DataFrame:
+    p = vix_path(historical_root, name)
     if not p.exists():
         return pd.DataFrame(columns=COLUMNS)
     df = pd.read_parquet(p)
@@ -46,10 +47,10 @@ def load(historical_root: Path, days: list[str] | None = None) -> pd.DataFrame:
     return df.sort_values("ts").reset_index(drop=True)
 
 
-def upsert(historical_root: Path, bars: pd.DataFrame) -> int:
-    p = vix_path(historical_root)
+def upsert(historical_root: Path, bars: pd.DataFrame, name: str = "india_vix") -> int:
+    p = vix_path(historical_root, name)
     p.parent.mkdir(parents=True, exist_ok=True)
-    old = load(historical_root)
+    old = load(historical_root, name=name)
     if len(bars):
         old = old[~old["session"].isin(set(bars["session"]))]
     df = pd.concat([x for x in (old, bars) if len(x)], ignore_index=True) if len(old) or len(bars) else bars
@@ -58,8 +59,8 @@ def upsert(historical_root: Path, bars: pd.DataFrame) -> int:
     return len(df)
 
 
-def coverage(historical_root: Path, days: list[str]) -> dict:
-    df = load(historical_root, days)
+def coverage(historical_root: Path, days: list[str], name: str = "india_vix") -> dict:
+    df = load(historical_root, days, name=name)
     per = df.groupby("session").size().to_dict() if len(df) else {}
     return {"days": len(days), "with_vix": sum(1 for d in days if per.get(d, 0) > 0),
             "full_days": sum(1 for d in days if per.get(d, 0) >= 370),

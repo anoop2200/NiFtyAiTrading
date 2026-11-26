@@ -65,6 +65,12 @@ class HistoryContext:
     def day_path(self, day: str):
         return self.cfg.path("historical") / self.dataset / f"date={day}" / "part-0.parquet"
 
+    def day_lot(self, day: str) -> int:
+        return lot_size_evidence(self.day_path(day))
+
+    def day_quotes(self, day: str) -> list:
+        return snapshot_quotes(self.day_path(day))
+
     def data_fingerprint(self) -> dict:
         h = hashlib.sha256()
         for d in self.days:
@@ -111,11 +117,10 @@ def simulate(ctx: HistoryContext, variants: dict[str, list], days: list[str] | N
     runs = {vid: VariantRun(vid, strats, RiskEngine(fees=ctx.fees, events=ctx.events, kill=KillSwitch(None)))
             for vid, strats in variants.items()}
     for day in days or ctx.days:
-        path = ctx.day_path(day)
-        lot = lot_size_evidence(path)
+        lot = ctx.day_lot(day)
         if lot not in (25, 50, 65, 75):
             raise ValueError(f"{day}: implausible lot size evidence {lot}")
-        quotes = snapshot_quotes(path)
+        quotes = ctx.day_quotes(day)
         index = ctx.index[ctx.index["session"] == day]
         ok, why = ctx.quality.get(day, (False, "NOT_RECONCILED"))
         for vid, run in runs.items():

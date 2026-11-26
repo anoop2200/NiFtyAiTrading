@@ -1,7 +1,7 @@
 # NSE Equity Derivatives (F&O) trading calendar — 2026
 # Versioned: change only via a commit, never at runtime.
 year: 2026
-version: 1
+version: 2
 verification:
   status: secondary_sources_cross_checked   # upgrade to nse_circular once the circular is read directly
   sources:
@@ -13,6 +13,9 @@ verification:
        (09-14, 10-02, 10-20, 11-10, 11-24)."
     - "NIFTY weekly expiries in that history moved to Monday for the Tuesday holidays
        10-20, 11-10 and 11-24 (10-19, 11-09, 11-23), matching the previous-trading-day rule."
+    - "2026-01-15 added in version 2: no NIFTY index bars (Dhan candles) and no rolling-option data on that
+       weekday, although both published lists omit it (a closure announced after the list, reportedly for the
+       Maharashtra municipal elections)."
   todo: Read NSE circular "Trading holidays for the calendar year 2026" (F&O) and set status to nse_circular.
 
 regular_session:
@@ -21,6 +24,7 @@ regular_session:
   close: "15:30"
 
 holidays:            # weekday closures
+  2026-01-15: Market closed (announced after the published list; see checks)
   2026-01-26: Republic Day
   2026-03-03: Holi
   2026-03-26: Shri Ram Navami

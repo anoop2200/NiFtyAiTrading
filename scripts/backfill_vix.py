@@ -22,7 +22,7 @@ from app.secrets import get_secret
 VIX_SECURITY_ID = 21     # India VIX in the Dhan master (IDX_I); verified against instrument_master_2026-11-26
 
 
-async def fetch(cfg, days: list[str], security_id: int) -> list[dict]:
+async def fetch(cfg, days: list[str], security_id: int, name: str = "india_vix") -> list[dict]:
     rest = DhanRest(cfg.get("dhan.rest_base"), get_secret("DHAN_CLIENT_ID"), get_secret("DHAN_ACCESS_TOKEN"),
                     cfg.get("dhan.option_chain_min_interval_s"), cfg.get("dhan.market_quote_min_interval_s"))
     out = []
@@ -33,7 +33,7 @@ async def fetch(cfg, days: list[str], security_id: int) -> list[dict]:
                 out.append({"day": day, "error": f"HTTP {r.status}: {r.text[:160]}"})
                 continue
             bars = vix.candles_to_bars(r.body, day)
-            vix.upsert(cfg.path("historical"), bars)
+            vix.upsert(cfg.path("historical"), bars, name)
             out.append({"day": day, "bars": len(bars),
                         "close": float(bars["close"].iloc[-1]) if len(bars) else None})
     finally:
@@ -47,14 +47,25 @@ def main() -> int:
     ap.add_argument("--to", dest="d_to")
     ap.add_argument("--security-id", type=int, default=VIX_SECURITY_ID)
     ap.add_argument("--coverage", action="store_true")
+    ap.add_argument("--days-from", choices=["pg", "rolling"], default="pg",
+                    help="which sessions: the PG import days, or the research-tier rolling-option days")
+    ap.add_argument("--nifty", action="store_true",
+                    help="NIFTY 50 index bars (security 13, stored as nifty_index) instead of India VIX")
     a = ap.parse_args()
     cfg = settings()
-    days = [d for d in history_days(cfg.path("historical"), cfg.get("historical_import.dataset"))
-            if (not a.d_from or d >= a.d_from) and (not a.d_to or d <= a.d_to)]
+    if a.days_from == "rolling":
+        from app.historical import rolling_options as ro
+        m = ro.read_manifest(cfg.path("historical"))
+        pool = sorted(d for d, v in m["days"].items() if v.get("status") == "ok")
+    else:
+        pool = history_days(cfg.path("historical"), cfg.get("historical_import.dataset"))
+    days = [d for d in pool if (not a.d_from or d >= a.d_from) and (not a.d_to or d <= a.d_to)]
+    sid, name = (13, "nifty_index") if a.nifty else (a.security_id, "india_vix")
     if not a.coverage:
-        for line in asyncio.run(fetch(cfg, days, a.security_id)):
-            print(json.dumps(line))
-    print(json.dumps(vix.coverage(cfg.path("historical"), days)))
+        for line in asyncio.run(fetch(cfg, days, sid, name)):
+            if line.get("error") or not line.get("bars") or line["bars"] < 370:
+                print(json.dumps(line))
+    print(json.dumps(vix.coverage(cfg.path("historical"), days, name)))
     return 0
 
 

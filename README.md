@@ -502,6 +502,46 @@ backtest or research (experiment) code. Dashboard: Backtests & research → "Exp
 .venv\Scripts\python scripts\import_rolling_options.py finalize | coverage | validate
 ```
 
+## Strategy pre-screen on one year of trade prices (research tier, 2026-11-26)
+
+`scripts/screen_strategies.py` runs the **production** pipeline (ORB + pullback, contract ranking, risk engine,
+paper broker, fees) over the 245 sessions of Dhan rolling-option history. Because that source has trade prices
+only, quotes are **modelled**: at each minute's end, bid/ask = close ∓ half the median spread observed in the PG
+snapshot history for that DTE bucket × moneyness (0.22–0.36% of mid), × a stress multiplier; top of book only
+(the fill model adds its low-fidelity tick). Index and VIX bars: Dhan 1-minute candles (`backfill_vix.py
+--days-from rolling [--nifty]`). Lot: the GCD of the day's open interest (75 until 2025-12-30, 65 from
+2025-12-31; roll weeks fall back to that date). Label `screen_ltp_modelled_spread` — **not evidence**: it
+cannot approve or promote anything, consumes no trial, touches no hold-out, writes no database (reports only,
+`data/reports/screen_*`); a test keeps `app.screen` out of the engine, strategies, risk, pipeline, backtest,
+research, ml and labels code.
+
+**Bias check** (`screen_strategies.py bias`, the 59 days both sources cover): quote-based backtest 127 trades,
+−12,854; screen 154 trades, −9,720 at 1× spread and −15,334 at 2×; 83 trades identical. Same sign and scale,
+not trade-for-trade (different index-bar source) — usable to rank ideas, not to measure them.
+
+**Full year, current rules** (2025-11-26 .. 2026-11-25):
+
+| spread | trades | net ₹ | win rate | profit factor | max DD ₹ |
+|---|---|---|---|---|---|
+| 1× | 639 | −80,454 | 29% | 0.73 | −85,909 |
+| 2× | 638 | −95,046 | 29% | 0.69 | −99,935 |
+| 4× | 522 | −96,834 | 27% | 0.64 | −100,801 |
+
+At 1×: gross −40,040 before charges of 40,414 — the rules lose **before** costs, so cheaper execution alone
+cannot rescue them. ORB −58,089 on 469 trades (25% winners); pullback −22,365 on 170 (41%). Exits:
+SETUP_INVALIDATED 361, TIME_STOP 217, TARGET 41, STOP 18. 10 of 13 months negative. By VIX at entry
+(exploratory, terciles): every band loses, the high-VIX band most. This is the 59-day verdict again with 4×
+the sessions: the current ORB / pullback rules have no edge, and a VIX filter on them does not create one.
+
+Calendar: `config/calendar/nse_2025.yaml` added (Aug–Dec data-checked; Jan–Jul from the published list,
+marked unverified); `nse_2026.yaml` v2 adds **2026-01-15** — a weekday with no NIFTY bars and no option data in
+two Dhan sources that both published holiday lists omit.
+
+```
+.venv\Scripts\python scripts\screen_strategies.py bias
+.venv\Scripts\python scripts\screen_strategies.py run [--from D] [--to D] [--multipliers 1,2,4]
+```
+
 ## Single-writer note
 
 In Phase 1 the recorder and import scripts are the only writers to `NiftyTradingAI.db` (do not run the PG import
