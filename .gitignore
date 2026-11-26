@@ -27,3 +27,4 @@ logs/
 *.parquet
 data/experiments/
 data/paper/
+data/models/

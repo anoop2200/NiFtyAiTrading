@@ -314,7 +314,7 @@ forms automatically from live-recorded sessions after 2026-11-25, once at least 
 
 ## Phase 8 — dashboard, kill switch, alerts, daily report (v1.3 §14, §9.5, §9.7)
 
-Phase 7 (ML) is optional and was skipped: no rule strategy has passed the research screen yet.
+Phase 7 (ML) was first deferred; its training stack is now built (see the Phase 7 section) and waits for prospective labels.
 
 | Piece | Where |
 |---|---|
@@ -348,6 +348,52 @@ the general last entry).
 | Notifications deduplicated | `test_dedup_and_throttle_and_digest`, `test_cap_never_suppresses_critical`, `test_failed_critical_is_retried`, `test_telegram_errors_never_contain_token` |
 | Kill switch blocks new entries immediately | `test_kill_on_blocks_risk_engine_immediately` (next evaluation rejected, `RESUME` required), `test_ack_command_is_consumed_by_engine_switch`, `test_risk_engine_reads_the_files_the_dashboard_writes` |
 | Daily report includes the capital-usage metrics | `test_daily_report_capital_metrics` (hand-computed peak, cumulative DD, shadow capital, planning figure, DTE split); real run: `send_daily_report.py` on `20261126-190221_rules_v1` |
+
+## Phase 7 — meta-model training stack (v1.3 §6.3, §11) — built, waiting for data
+
+Everything that can be built before the data exists is built and tested; **no model is in the trading path**.
+`PipelineConfig.meta_label` stays rule-only and a test forbids any `app.ml` import from the engine, strategies,
+risk, pipeline or backtest code.
+
+| Piece | Where |
+|---|---|
+| Dataset: `TradeLabels` for one horizon → resolved labels only (TARGET_FIRST / STOP_FIRST / TIMEOUT); decision-time features through an explicit allow-list; absolute price levels turned into relative ones (ATR %, position in the opening range, EMA gap / ATR, ...); outcome and risk-engine columns can never be features (`leakage_report`); `session_date` is the CV group; dataset fingerprint (sha256) | `app/ml/dataset.py` |
+| Target: P(win), win = labelled one-lot trade closed with positive net P&L after charges within the horizon | `app/ml/train.py` |
+| Walk-forward CV: sessions sorted, expanding window, ≥20 training sessions, 1-session embargo, each fold = fit block → later calibration block → embargo → later test block; no session ever in two roles | `walk_forward_folds` |
+| LightGBM (small, regularised, deterministic) + Platt (sigmoid) or isotonic calibration fitted on the calibration block only | `fit_calibrated`, `Calibrator` |
+| Take/skip threshold = break-even P(win) from the training window's average win and loss (never tuned on test) | `breakeven_p` |
+| Baselines: the training window's base rate as a constant probability (Brier, log loss, ECE) and the rule-only policy that takes every candidate (net after costs); day-block bootstrap of the net difference | `evaluate`, `oof_metrics` |
+| Promotion gate: prospective labels only, label adequacy (500 / 100 per class / 60 sessions), no leakage, ≥30 out-of-fold sessions, Brier and log loss beat baseline, ECE ≤ 0.05, net improvement > 0 and its bootstrap 5th percentile > 0 | `promotion_gate` |
+| Registry (schema v8): `ModelTrainingRuns` (dataset fingerprint, folds, metrics, gate, code fingerprint), `ModelVersions` (JSON artifact under `data/models/` with sha256 — no pickle; status RESEARCH_ONLY / CANDIDATE / APPROVED / RETIRED), `ModelPredictions` (out-of-fold predictions). History-trained or gate-failed models are RESEARCH_ONLY and can never be approved; approval needs a CANDIDATE, a matching artifact hash and an operator name + reason (written to the hash-chained operator log); a new approval retires the old one | `app/ml/registry.py` |
+
+```
+.venv\Scripts\python scripts\train_meta_model.py train                         # prospective labels, main DB
+.venv\Scripts\python scripts\train_meta_model.py train --db research --history # pipeline dry run (RESEARCH_ONLY)
+.venv\Scripts\python scripts\train_meta_model.py list [--db research]
+.venv\Scripts\python scripts\train_meta_model.py approve --id N --actor NAME --reason "..."
+```
+
+Dry run on the history labels (research DB, horizon 15): 187 resolved candidates over 54 sessions, 104
+out-of-fold rows over 33 sessions. The model does **not** beat the baseline (Brier 0.296 vs 0.274, ECE 0.17) and
+loses money against rule-only (−6,077 per lot over the test folds) → `meta_v1 v1` RESEARCH_ONLY. Expected with
+this little data; it shows the guards work, not that a model is impossible.
+
+**Still to do (needs data, not code):** ≥500 prospective labels (`run_paper.py labels` shows progress), then
+`train`, then — only for a CANDIDATE — operator approval, then shadow mode (log predictions next to rule-only
+decisions, no effect on trades) before the meta-model may filter anything. The shadow wiring is deliberately not
+built yet: it should be designed against a real approved model.
+
+### Phase 7 acceptance checklist
+
+| Criterion | Evidence |
+|---|---|
+| No leakage: decision-time features only, day-grouped chronological validation | `test_dataset_excludes_unresolved_and_has_no_outcome_features`, `test_leakage_report_flags_outcome_columns`, `test_walk_forward_folds_are_chronological_and_disjoint`, `test_future_outcomes_do_not_change_earlier_predictions` |
+| Calibrated probabilities better than baseline | `test_signal_beats_baseline_and_noise_does_not`, `test_calibrator_roundtrip_and_ece`, gate checks |
+| Improves net after-cost metrics vs rule-only | `net_after_cost_improves` + `net_improvement_robust` gate checks; `test_gate_requires_every_check` |
+| Only enough prospective labels count; history never promotes | `test_history_model_is_research_only_and_never_approvable`, `test_adequacy_counts_only_prospective_labels` |
+| Registry, artifacts, approval | `test_prospective_model_candidate_approve_and_supersede`, `test_tampered_artifact_blocks_approval` |
+| Meta-model outside the trading path until approved | `test_trading_path_does_not_use_the_meta_model` |
+| **Model trained on ≥500 prospective labels and passes the gate** | **Not yet — needs live sessions.** |
 
 ## Phase 9 — integrated paper trading (rule-only) + the Phase 7 label pipeline (v1.3 §6.3, §12, §17)
 

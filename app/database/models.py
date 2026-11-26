@@ -7,7 +7,7 @@ from __future__ import annotations
 from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 SCHEMA_DESCRIPTIONS = {
     1: "Phase 1: instruments, sessions, events, historical imports",
     2: "Phase 2: derived bar builds and daily data-quality matrix",
@@ -16,6 +16,7 @@ SCHEMA_DESCRIPTIONS = {
     5: "Phase 5: trading signals (candidates + risk decisions) and risk events",
     6: "Phase 6: experiments, experiment results, strategy trial counter, hold-outs and hold-out access log",
     7: "Phase 9: paper-engine sessions and candidate trade labels (Phase 7 track)",
+    8: "Phase 7: meta-model registry (training runs, model versions, predictions)",
 }
 
 
@@ -420,3 +421,64 @@ class TradeLabels(Base):
     features: Mapped[str] = mapped_column(Text)                         # JSON, decision-time only
     data_tier: Mapped[str] = mapped_column(String(60))                  # prospective (live feed) vs history
     label_version: Mapped[str] = mapped_column(String(20))
+
+
+class ModelTrainingRuns(Base):
+    """One walk-forward training + evaluation of the meta-model (v1.3 §6.3, §11) (v8)."""
+    __tablename__ = "ModelTrainingRuns"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[str] = mapped_column(String(40))
+    model_name: Mapped[str] = mapped_column(String(60), index=True)
+    horizon_min: Mapped[int] = mapped_column(Integer)
+    target: Mapped[str] = mapped_column(String(60))
+    data_tiers: Mapped[str] = mapped_column(Text)                       # JSON list
+    label_runs: Mapped[str] = mapped_column(Text)                       # JSON list of TradeLabels.run_id
+    dataset_fingerprint: Mapped[str] = mapped_column(String(64))
+    rows: Mapped[int] = mapped_column(Integer)
+    sessions: Mapped[int] = mapped_column(Integer)
+    first_session: Mapped[str | None] = mapped_column(String(10))
+    last_session: Mapped[str | None] = mapped_column(String(10))
+    params: Mapped[str] = mapped_column(Text)                           # JSON (model + CV + calibration)
+    folds: Mapped[str] = mapped_column(Text)                            # JSON per-fold sessions / metrics
+    metrics: Mapped[str] = mapped_column(Text)                          # JSON out-of-fold model vs baseline
+    leakage: Mapped[str] = mapped_column(Text)                          # JSON
+    gate: Mapped[str] = mapped_column(Text)                             # JSON promotion-gate checks
+    code_fingerprint: Mapped[str | None] = mapped_column(String(64))
+
+
+class ModelVersions(Base):
+    """A trained, calibrated model artifact. Status: RESEARCH_ONLY (never promotable: history data or failed
+    gate) / CANDIDATE (gate passed, awaiting operator approval) / APPROVED / RETIRED (v8)."""
+    __tablename__ = "ModelVersions"
+    __table_args__ = (UniqueConstraint("model_name", "version"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    model_name: Mapped[str] = mapped_column(String(60), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    training_run_id: Mapped[int] = mapped_column(ForeignKey("ModelTrainingRuns.id"))
+    created_at: Mapped[str] = mapped_column(String(40))
+    artifact_path: Mapped[str] = mapped_column(Text)
+    artifact_sha256: Mapped[str] = mapped_column(String(64))
+    features: Mapped[str] = mapped_column(Text)                         # JSON list (model input order)
+    calibration: Mapped[str] = mapped_column(String(20))
+    status: Mapped[str] = mapped_column(String(20), index=True)
+    status_reason: Mapped[str] = mapped_column(Text, default="")
+    approved_by: Mapped[str | None] = mapped_column(String(60))
+    approved_at: Mapped[str | None] = mapped_column(String(40))
+
+
+class ModelPredictions(Base):
+    """Calibrated probabilities per candidate: out-of-fold (kind=oof) from training, later shadow/live (v8)."""
+    __tablename__ = "ModelPredictions"
+    __table_args__ = (UniqueConstraint("model_version_id", "kind", "label_run_id", "session_date", "signal_seq"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    model_version_id: Mapped[int] = mapped_column(ForeignKey("ModelVersions.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(10))                       # oof / shadow / live
+    fold: Mapped[int | None] = mapped_column(Integer)
+    label_run_id: Mapped[str] = mapped_column(String(60))
+    session_date: Mapped[str] = mapped_column(String(10), index=True)
+    signal_seq: Mapped[int] = mapped_column(Integer)
+    strategy_id: Mapped[str] = mapped_column(String(40))
+    p_win: Mapped[float] = mapped_column(Float)
+    take: Mapped[int] = mapped_column(Integer)
+    outcome_label: Mapped[str | None] = mapped_column(String(20))
+    net_pnl_per_lot: Mapped[float | None] = mapped_column(Float)
