@@ -19,6 +19,7 @@ data/temporary/
 data/runtime/
 data/reports/
 data/derived/
+data/backtests/
 logs/
 *.db
 *.db-wal

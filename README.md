@@ -1,4 +1,4 @@
-# NiftyTradingAI — Phase 1 (foundation + data recorder) Phase 2 (market data layer) and Phase 3 (indicator framework)
+# NiftyTradingAI — Phase 1 (foundation + data recorder) Phase 2 (market data layer), Phase 3 (indicator framework) and Phase 4 (backtester + paper broker)
 
 Design baseline: `NiftyTradingAI_v1.3_Revised_Architecture.docx`. Paper trading only; no order APIs exist in this code.
 
@@ -180,6 +180,41 @@ relative volume on a labelled synthetic stream, so they cannot be approved until
 provider evidently uses a different time-to-expiry convention. This matters because expiry days are traded —
 **open item**: decide the 0DTE time convention (calendar seconds vs trading-time / variance-time) and stress-test
 the r/q assumptions before any IV-based rule is approved.
+
+## Phase 4 — event-driven backtester + paper broker (v1.3 §8.3, §9.6, §9.7, §10.2)
+
+| Piece | Where |
+|---|---|
+| Versioned fee schedule (brokerage, exchange txn, SEBI, STT sell, stamp buy, GST) | `config/fees.yaml`, `app/backtest/fees.py` |
+| Fill model: ask-entry / bid-exit ladder walk, VWAP, partial fills, price protection, consumed liquidity, top-of-book low-fidelity slippage, refusals (no/stale quote, side withdrawn, crossed, spread too wide) | `app/backtest/fills.py` |
+| Paper broker: decision→arrival latency, order timeouts, exits never abandoned (re-submitted), premium stop/target on executable bid, time stop, flat by 15:25, one active position per cycle, capital usage | `app/backtest/broker.py` |
+| Conservative intrabar resolution for OHLC-only data (stop first, gaps fill at open) | `broker.resolve_bar_exit` |
+| Event-driven replay (quotes → timers → bar-close decisions, never backwards) using the same IndicatorEngine / broker as paper | `app/backtest/replay.py` |
+| Hash-chained audit of every decision, attempt, fill, charge and close | `app/backtest/audit.py` |
+| Persistence: PaperTrades, PaperTradeEvents, CapitalUsage (schema v4); backtests go to `NiftyTradingAI_research.db` | `app/backtest/persist.py` |
+| History quotes (top-of-book snapshots, lot size from observed quantities, never today's master) | `app/backtest/history.py` |
+
+```
+.venv\Scripts\python scripts\run_backtest.py --verify-replay   # -> data/backtests/<run_id>/ + research DB
+```
+
+### Phase 4 acceptance checklist
+
+| Criterion | Evidence |
+|---|---|
+| Golden replay fixtures pass | `tests/golden/replay_cases.json` — 13 hand-derived scenarios (target with exact charges, depth VWAP, partial fills, entry timeout, low-fidelity slippage, latency, stale quote, withdrawn bid, spread too wide, duplicate cycle, 15:25 flat, time stop, exit re-submit) |
+| Conservative intrabar resolution | `tests/test_backtest_units.py::test_conservative_intrabar_resolution` |
+| Ask-entry / bid-exit | fill model; golden cases; LTP is never a fill price (`test_never_uses_ltp_and_needs_a_side`) |
+| Fill and cost audit reproducible | audit hash identical across runs (golden + full history); chain verification detects tampering |
+
+**Real-data replay** (59 days, `observed_top_of_book_snapshot` quotes, plumbing-check ORB from `app/backtest/demo.py`):
+85 trades, every fill flagged low-fidelity (no depth in history), identical combined audit hash on repeated runs,
+all audit chains valid; fills spot-checked against raw snapshots (entry = ask + 1 tick, exit = bid − 1 tick).
+The demo's P&L is **not** a strategy result — Phase 5 builds the real strategies with the risk engine.
+
+Open items: verify `config/fees.yaml` against a real Dhan contract note (IPFT currently 0); latency 250 ms is
+an assumption until live decision→order timings are measured; history has only top-of-book (depth-ladder
+fills get exercised once live sessions are recorded).
 
 ## Single-writer note
 

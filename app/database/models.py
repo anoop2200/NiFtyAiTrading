@@ -7,11 +7,12 @@ from __future__ import annotations
 from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SCHEMA_DESCRIPTIONS = {
     1: "Phase 1: instruments, sessions, events, historical imports",
     2: "Phase 2: derived bar builds and daily data-quality matrix",
     3: "Phase 3: indicator definitions (registry) and indicator runs",
+    4: "Phase 4: paper trades, paper trade events (audit) and capital usage",
 }
 
 
@@ -176,3 +177,66 @@ class IndicatorRuns(Base):
     output_sha256: Mapped[str] = mapped_column(String(64))
     output_hash: Mapped[str] = mapped_column(String(64))         # content hash for deterministic replay
     checks: Mapped[str] = mapped_column(Text)                    # JSON: batch=stream, replay, restart results
+
+
+class PaperTrades(Base):
+    """Closed paper trades (v4). `mode` = backtest / paper; values are after charges."""
+    __tablename__ = "PaperTrades"
+    __table_args__ = (UniqueConstraint("run_id", "session_date", "trade_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(60), index=True)
+    mode: Mapped[str] = mapped_column(String(10))
+    session_date: Mapped[str] = mapped_column(String(10), index=True)
+    trade_id: Mapped[int] = mapped_column(Integer)
+    cycle_key: Mapped[str] = mapped_column(Text)
+    strategy_id: Mapped[str] = mapped_column(String(60))
+    contract: Mapped[str] = mapped_column(String(60))
+    dte: Mapped[int | None] = mapped_column(Integer)
+    qty: Mapped[int] = mapped_column(Integer)
+    entry_ts: Mapped[str] = mapped_column(String(40))
+    exit_ts: Mapped[str] = mapped_column(String(40))
+    entry_px: Mapped[float] = mapped_column(Float)
+    exit_px: Mapped[float] = mapped_column(Float)
+    exit_reason: Mapped[str] = mapped_column(String(40))
+    gross_pnl: Mapped[float] = mapped_column(Float)
+    charges: Mapped[float] = mapped_column(Float)
+    net_pnl: Mapped[float] = mapped_column(Float)
+    risk_inr: Mapped[float] = mapped_column(Float)
+    r_multiple: Mapped[float | None] = mapped_column(Float)
+    low_fidelity: Mapped[int] = mapped_column(Integer)
+    fee_version: Mapped[str] = mapped_column(String(40))
+    fill_model: Mapped[str] = mapped_column(String(40))
+
+
+class PaperTradeEvents(Base):
+    """Hash-chained audit records (decision, order, attempt, fill, charges, close) (v4)."""
+    __tablename__ = "PaperTradeEvents"
+    __table_args__ = (UniqueConstraint("run_id", "session_date", "seq"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(60), index=True)
+    session_date: Mapped[str] = mapped_column(String(10))
+    seq: Mapped[int] = mapped_column(Integer)
+    ts: Mapped[str] = mapped_column(String(40))
+    kind: Mapped[str] = mapped_column(String(30), index=True)
+    trade_id: Mapped[int | None] = mapped_column(Integer)
+    payload: Mapped[str] = mapped_column(Text)
+    prev_hash: Mapped[str] = mapped_column(String(64))
+    hash: Mapped[str] = mapped_column(String(64))
+
+
+class CapitalUsage(Base):
+    """Per-session capital usage and live-capital planning inputs (v1.3 §9.7) (v4)."""
+    __tablename__ = "CapitalUsage"
+    __table_args__ = (UniqueConstraint("run_id", "session_date"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(60), index=True)
+    mode: Mapped[str] = mapped_column(String(10))
+    session_date: Mapped[str] = mapped_column(String(10), index=True)
+    peak_capital: Mapped[float] = mapped_column(Float)
+    peak_capital_ts: Mapped[str | None] = mapped_column(String(40))
+    peak_trade_ids: Mapped[str] = mapped_column(Text)           # JSON
+    net_pnl: Mapped[float] = mapped_column(Float)
+    max_intraday_drawdown: Mapped[float] = mapped_column(Float)
+    largest_trade_risk: Mapped[float] = mapped_column(Float)
+    largest_0dte_risk: Mapped[float] = mapped_column(Float)
+    trades: Mapped[int] = mapped_column(Integer)

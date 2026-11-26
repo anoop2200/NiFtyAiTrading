@@ -1,0 +1,19 @@
+# Versioned fee schedules for NSE index options (v1.3 §8.3). Never edit a published version in place:
+# add a new version with effective_from and switch `active`. Every simulated fill records the version used.
+#
+# STATUS: rates below are the published statutory/exchange rates as understood at authoring time plus
+# Dhan's flat F&O brokerage. They MUST be verified against a real Dhan contract note before Phase 9
+# (open item). Percentages are of premium turnover unless noted.
+active: nse_opt_2024_10_v1
+
+schedules:
+  nse_opt_2024_10_v1:
+    effective_from: 2024-10-01
+    brokerage_per_order: 20.0          # INR per executed order (Dhan F&O flat)
+    exchange_txn_pct: 0.03503          # NSE options transaction charge, % of premium, both sides
+    sebi_fee_per_crore: 10.0           # INR 10 per crore of turnover, both sides
+    stt_sell_pct: 0.1                  # STT on options sale, % of premium (sell side only)
+    stamp_duty_buy_pct: 0.003          # stamp duty, % of premium (buy side only)
+    ipft_per_crore: 0.0                # NSE IPFT: set once confirmed from a contract note
+    gst_pct: 18.0                      # on brokerage + exchange txn + SEBI fee (+ IPFT)
+    rounding: 2                        # INR decimals per charge line
