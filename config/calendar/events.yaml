@@ -1,0 +1,17 @@
+# High-impact scheduled events (v1.3 §3.3, §9.3). Versioned; source per entry is mandatory.
+# Open issue OI-07: choose the official source + manual override process. Until then add entries by hand.
+#
+# Entry format:
+#   - date: 2026-12-04
+#     time: "10:00"            # IST announcement time; null = whole day
+#     type: rbi_policy         # rbi_policy | union_budget | macro | nifty_heavyweight_result | banknifty_result | us_cpi | fomc
+#     name: RBI MPC decision
+#     source: https://www.rbi.org.in/...
+#
+# Default blackout windows (minutes before / after) per type; RBI and Budget use 30/30 (v1.3 §9.3).
+blackout_minutes:
+  default: [15, 15]
+  rbi_policy: [30, 30]
+  union_budget: [30, 30]
+
+events: []

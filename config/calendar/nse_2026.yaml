@@ -1,0 +1,51 @@
+# NSE Equity Derivatives (F&O) trading calendar — 2026
+# Versioned: change only via a commit, never at runtime.
+year: 2026
+version: 1
+verification:
+  status: secondary_sources_cross_checked   # upgrade to nse_circular once the circular is read directly
+  sources:
+    - https://www.tickertape.in/blog/nse-holidays-2026/  (updated 2025-12-30)
+    - https://www.angelone.in/news/market-updates/indian-stock-market-holidays-2026-full-nse-trading-calendar-and-key-dates  (updated 2025-12-29)
+  checks:
+    - Both sources list the same 15 weekday closures.
+    - "optionchain_db history 2026-08-27..2026-11-25 has no data on any listed holiday in that range
+       (09-14, 10-02, 10-20, 11-10, 11-24)."
+    - "NIFTY weekly expiries in that history moved to Monday for the Tuesday holidays
+       10-20, 11-10 and 11-24 (10-19, 11-09, 11-23), matching the previous-trading-day rule."
+  todo: Read NSE circular "Trading holidays for the calendar year 2026" (F&O) and set status to nse_circular.
+
+regular_session:
+  pre_open: "09:00-09:08"
+  open: "09:15"
+  close: "15:30"
+
+holidays:            # weekday closures
+  2026-01-26: Republic Day
+  2026-03-03: Holi
+  2026-03-26: Shri Ram Navami
+  2026-03-31: Shri Mahavir Jayanti
+  2026-04-03: Good Friday
+  2026-04-14: Dr. Baba Saheb Ambedkar Jayanti
+  2026-05-01: Maharashtra Day
+  2026-05-28: Bakri Id
+  2026-06-26: Muharram
+  2026-09-14: Ganesh Chaturthi
+  2026-10-02: Mahatma Gandhi Jayanti
+  2026-10-20: Dussehra
+  2026-11-10: Diwali Balipratipada
+  2026-11-24: Prakash Gurpurb Sri Guru Nanak Dev
+  2026-12-25: Christmas
+
+weekend_holidays:    # informational only (already non-trading)
+  2026-02-15: Mahashivratri
+  2026-03-21: Id-Ul-Fitr
+  2026-08-15: Independence Day
+  2026-11-08: Diwali Laxmi Pujan
+
+special_sessions:    # trading on otherwise closed days; times null = not confirmed -> not tradable by default
+  - date: 2026-11-08
+    name: Muhurat Trading
+    open: null
+    close: null
+    tradable: false   # one-hour ceremonial session; excluded from strategies until timings are confirmed

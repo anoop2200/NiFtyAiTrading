@@ -2,6 +2,7 @@ import sqlite3
 
 from sqlalchemy.orm import Session
 
+from app.database.models import SCHEMA_VERSION
 from app.database.backup import backup, integrity_ok, restore
 from app.database.db import init_db, log_event, make_engine, schema_version
 from app.database.models import SystemEvents
@@ -12,7 +13,7 @@ def test_backup_and_restore_roundtrip(tmp_path):
     db = tmp_path / "NiftyTradingAI.db"
     e = make_engine(db)
     init_db(e)
-    assert schema_version(e) == 1
+    assert schema_version(e) == SCHEMA_VERSION
     log_event(e, "INFO", "test", "before_backup")
     b = backup(db, tmp_path / "backups", stamp="t1")
     assert integrity_ok(b)

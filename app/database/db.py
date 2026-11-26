@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.clock import iso
 from app.config import settings
-from app.database.models import SCHEMA_VERSION, Base, SchemaVersion, SystemEvents
+from app.database.models import SCHEMA_DESCRIPTIONS, SCHEMA_VERSION, Base, SchemaVersion, SystemEvents
 
 
 def _sqlite_pragmas(dbapi_conn, _record):
@@ -37,10 +37,11 @@ def make_engine(db_path: Path | str | None = None) -> Engine:
 def init_db(engine: Engine) -> None:
     Base.metadata.create_all(engine)
     with Session(engine) as s:
-        if s.get(SchemaVersion, SCHEMA_VERSION) is None:
-            s.add(SchemaVersion(version=SCHEMA_VERSION, applied_at=iso(),
-                                description="Phase 1: instruments, sessions, events, historical imports"))
-            s.commit()
+        # migrations so far are additive (new tables only), so create_all is the whole upgrade
+        for v in range(1, SCHEMA_VERSION + 1):
+            if s.get(SchemaVersion, v) is None:
+                s.add(SchemaVersion(version=v, applied_at=iso(), description=SCHEMA_DESCRIPTIONS[v]))
+        s.commit()
 
 
 def session_factory(engine: Engine) -> sessionmaker:

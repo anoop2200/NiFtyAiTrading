@@ -1,4 +1,4 @@
-# NiftyTradingAI — Phase 1 (foundation + data recorder)
+# NiftyTradingAI — Phase 1 (foundation + data recorder) and Phase 2 (market data layer)
 
 Design baseline: `NiftyTradingAI_v1.3_Revised_Architecture.docx`. Paper trading only; no order APIs exist in this code.
 
@@ -83,6 +83,56 @@ with row count, snapshot count, checksum and quality metrics (gaps, crossed quot
 - Instrument-master security-ID column is assumed `SEM_SMST_SECURITY_ID` (falls back to `SECURITY_ID`);
   the master fails closed if neither exists.
 - LTT epoch interpretation (UTC vs IST-shifted) is reported by `verify_session.py`.
+
+## Phase 2 — market data layer (v1.3 §17)
+
+| Piece | Where |
+|---|---|
+| NSE trading calendar 2026 (holidays, sessions, Muhurat special session, expiry adjustment, DTE, fail-closed for uncovered years) | `config/calendar/nse_2026.yaml`, `app/market/calendar.py` |
+| Event calendar with mandatory source + blackout windows (OI-07 still open: no events loaded yet) | `config/calendar/events.yaml` |
+| Dated instrument map + futures roll rule (volume cross-over or 2 trading days before expiry) | `app/market/mapping.py` |
+| Quote normalizer with quality flags (DUPLICATE, OUT_OF_ORDER, CROSSED, ZERO_QTY, INVALID_INSTRUMENT, CLOCK_SKEW, PARSE_ERROR, LATE); bid/ask never forward-filled | `app/marketdata/normalize.py` |
+| Staleness: feed liveness vs per-instrument change age (FRESH / QUIET_CONFIRM / STALE / FEED_DOWN) | `app/marketdata/staleness.py` |
+| Streaming 1-minute bar builder (same code live and batch), exchange-time bucketing, watermark finalization, late-event accounting, day-high/low extreme recovery | `app/marketdata/bars.py` |
+| Snapshot-history bars (tier `reconstructed_from_snapshots`) | `bars.snapshot_bars` → `data/derived/pg_option_bars_1m/`, `pg_spot_bars_1m/` |
+| Daily data-quality matrix per instrument | `app/marketdata/quality.py` → `DataQualityDaily` |
+| Reconciliation vs Dhan `/charts/intraday` candles | `app/marketdata/reconcile.py` |
+| SQLite schema v2: `BarBuilds` (provenance + reconciliation JSON), `DataQualityDaily` | `app/database/models.py` |
+
+```
+.venv\Scripts\python scriptsuild_history_bars.py --reconcile     # PG history -> bars, spot vs Dhan index candles
+.venv\Scripts\python scriptsuild_bars.py 2026-12-01 --reconcile  # recorded feed day -> bars + quality matrix
+```
+
+### Documented reconciliation tolerance
+
+Per minute present on both sides; a day passes when >= 95% of common minutes are within tolerance **and**
+our bars cover >= 95% of the reference minutes.
+
+| Field | Feed bars (`observed_feed`) | Snapshot bars (`reconstructed_from_snapshots`, ~10 s sampling) |
+|---|---|---|
+| open / close | max(2 ticks, 0.02%) | max(2 ticks, 0.06%) |
+| high / low | inside reference range (±1 tick) and within 0.05% | inside range (±1 tick) and within 0.10% |
+| volume | within 5% or 2 lots (index: not compared) | not compared |
+
+Snapshot tolerance is wider because a minute's true open/close can lie up to one sampling interval away from
+the first/last sample; NIFTY can move 10–20 points in that time.
+
+**Result on the 59 imported days (2026-08-27 .. 2026-11-25), NIFTY spot vs Dhan index candles:** 56/59 days pass;
+median 99.47% of minutes within tolerance, median |close error| 1.15 points. The 3 failing days (11-02, 11-13,
+11-19) fail on coverage only (88–93%) — the known gaps in the PG history — while their present minutes are >99%
+within tolerance. Report: `data/reports/history_bars_summary.json`.
+
+### Phase 2 acceptance checklist
+
+| Criterion | Evidence |
+|---|---|
+| Unit tests for out-of-order / duplicate / stale / crossed events | `tests/test_normalize_staleness.py`, `tests/test_bars_quality_reconcile.py` |
+| Bars reconcile to source within documented tolerance | `build_history_bars.py --reconcile` (above); feed bars: `build_bars.py --reconcile` on the first recorded live day |
+| Holiday / special-session test passes | `tests/test_calendar_mapping.py` (Tuesday-holiday expiries 10-20/11-10/11-24 → Monday, Muhurat not tradable, 2027 fails closed) |
+
+Still open: feed-bar reconciliation needs one recorded live day (same day as Phase 1 acceptance); the 2027 holiday
+file must be added once NSE publishes it; Muhurat timings are unconfirmed; OI-07 event source.
 
 ## Single-writer note
 

@@ -7,7 +7,11 @@ from __future__ import annotations
 from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SCHEMA_DESCRIPTIONS = {
+    1: "Phase 1: instruments, sessions, events, historical imports",
+    2: "Phase 2: derived bar builds and daily data-quality matrix",
+}
 
 
 class Base(DeclarativeBase):
@@ -99,3 +103,40 @@ class HistoricalImports(Base):
     sha256: Mapped[str] = mapped_column(String(64))
     quality: Mapped[str] = mapped_column(Text)  # JSON
     imported_at: Mapped[str] = mapped_column(String(40))
+
+
+class BarBuilds(Base):
+    """Provenance of each derived bar partition (v2)."""
+    __tablename__ = "BarBuilds"
+    __table_args__ = (UniqueConstraint("dataset", "trade_date"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dataset: Mapped[str] = mapped_column(String(60))        # feed_bars_1m / pg_option_bars_1m / pg_spot_bars_1m
+    trade_date: Mapped[str] = mapped_column(String(10), index=True)
+    data_tier: Mapped[str] = mapped_column(String(40))
+    source: Mapped[str] = mapped_column(Text)
+    rows: Mapped[int] = mapped_column(Integer)
+    instruments: Mapped[int] = mapped_column(Integer)
+    file_path: Mapped[str] = mapped_column(Text)
+    sha256: Mapped[str] = mapped_column(String(64))
+    params: Mapped[str] = mapped_column(Text, default="{}")   # JSON (timeframe, grace, code version)
+    reconciliation: Mapped[str | None] = mapped_column(Text)  # JSON result vs broker candles
+    built_at: Mapped[str] = mapped_column(String(40))
+
+
+class DataQualityDaily(Base):
+    """Daily per-instrument data-quality matrix (v2)."""
+    __tablename__ = "DataQualityDaily"
+    __table_args__ = (UniqueConstraint("trade_date", "security_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    trade_date: Mapped[str] = mapped_column(String(10), index=True)
+    security_id: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str | None] = mapped_column(String(10))
+    events: Mapped[int] = mapped_column(Integer)
+    trades: Mapped[int] = mapped_column(Integer)
+    book_events: Mapped[int] = mapped_column(Integer)
+    flags: Mapped[str] = mapped_column(Text)  # JSON counts per flag
+    max_change_gap_s: Mapped[float] = mapped_column(Float)
+    pct_time_fresh: Mapped[float | None] = mapped_column(Float)
+    mean_spread: Mapped[float | None] = mapped_column(Float)
+    bars: Mapped[int | None] = mapped_column(Integer)
+    bar_coverage_pct: Mapped[float | None] = mapped_column(Float)

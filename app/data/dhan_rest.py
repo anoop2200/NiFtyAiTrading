@@ -96,6 +96,16 @@ class DhanRest:
                                  "Expiry": expiry})
 
 
+    async def intraday_candles(self, security_id: int, segment: str, instrument: str, from_dt: str, to_dt: str,
+                               interval: str = "1", oi: bool = False) -> RestResult:
+        """POST /charts/intraday — minute candles (from/to 'YYYY-MM-DD HH:MM:SS', IST)."""
+        await self._gate.wait("charts", self.quote_interval_s)
+        return await self._call("POST", "/charts/intraday",
+                                {"securityId": str(security_id), "exchangeSegment": segment,
+                                 "instrument": instrument, "interval": interval, "oi": oi,
+                                 "fromDate": from_dt, "toDate": to_dt})
+
+
 def extract_ltp(body: Any, segment: str, security_id: int) -> float | None:
     """Best-effort LTP extraction from /marketfeed/ltp: {"data": {SEG: {"<id>": {"last_price": x}}}}."""
     try:
