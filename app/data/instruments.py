@@ -33,10 +33,11 @@ class Selection:
     options: pd.DataFrame
     total_rows: int
     report: dict = field(default_factory=dict)
+    vix: dict | None = None          # India VIX (IDX_I) — market volatility-level input (v1.3 decision 2026-11-26)
 
     @property
     def selected_rows(self) -> int:
-        return 1 + len(self.futures) + len(self.options)
+        return 1 + len(self.futures) + len(self.options) + (self.vix is not None)
 
 
 def download_master(url: str, dest_dir: Path, today: date) -> tuple[Path, str]:
@@ -80,7 +81,8 @@ def _norm(df: pd.DataFrame, sec_col: str, segment: str, underlying: str) -> pd.D
 
 
 def parse_master(path: Path, master_date: date, underlying: str = "NIFTY", index_symbol: str = "NIFTY",
-                 option_prefix: str = "NIFTY-", index_id_override: int | None = None) -> Selection:
+                 option_prefix: str = "NIFTY-", index_id_override: int | None = None,
+                 vix_symbol: str | None = "INDIA VIX") -> Selection:
     df = pd.read_csv(path, dtype=str, low_memory=False)
     df.columns = [c.strip() for c in df.columns]
     missing = [c for c in REQUIRED if c not in df.columns]
@@ -104,7 +106,12 @@ def parse_master(path: Path, master_date: date, underlying: str = "NIFTY", index
 
     fut = _norm(nse[(name == "FUTIDX") & sym.str.startswith(option_prefix)], sec_col, "NSE_FNO", underlying)
     opt = _norm(nse[(name == "OPTIDX") & sym.str.startswith(option_prefix)], sec_col, "NSE_FNO", underlying)
-    return Selection(master_date, index, fut, opt, total_rows=len(df))
+    vix = None
+    vix_rows = nse[(name == "INDEX") & (sym == vix_symbol)] if vix_symbol else nse.iloc[0:0]
+    if len(vix_rows) == 1:
+        vix = {"security_id": int(vix_rows.iloc[0][sec_col]), "trading_symbol": vix_symbol,
+               "exchange_segment": "IDX_I", "instrument_type": "VIX", "underlying": "INDIAVIX"}
+    return Selection(master_date, index, fut, opt, total_rows=len(df), vix=vix)
 
 
 def validate(sel: Selection, today: date, min_options: int = 200) -> dict:
@@ -160,6 +167,10 @@ def persist(engine: Engine, sel: Selection, source_url: str, file_path: Path, sh
         rows = [Instruments(master_id=m.id, master_date=md, security_id=sel.index["security_id"],
                             exchange_segment="IDX_I", instrument_type="INDEX",
                             underlying=sel.index["underlying"], trading_symbol=sel.index["trading_symbol"])]
+        if sel.vix is not None:
+            rows.append(Instruments(master_id=m.id, master_date=md, security_id=sel.vix["security_id"],
+                                    exchange_segment="IDX_I", instrument_type="VIX", underlying="INDIAVIX",
+                                    trading_symbol=sel.vix["trading_symbol"]))
         for frame in (sel.futures, sel.options):
             for r in frame.itertuples(index=False):
                 rows.append(Instruments(

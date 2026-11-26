@@ -74,6 +74,9 @@ class DecisionPipeline:
     # ------------------------------------------------------------------ replay entry point
     def on_bar(self, stream: str, bar: dict, outs: dict[str, dict], ctx: Context) -> list:
         self.latest.update(outs)
+        if stream == "vix":
+            self._on_vix(bar)
+            return []
         if stream != "index":
             return []                                  # futures bars only feed indicators
         if bar.get("session") != self.session:
@@ -94,6 +97,30 @@ class DecisionPipeline:
                 else:
                     acts += self._candidate(res, bar, ctx, unreal)
         return acts
+
+    # ------------------------------------------------------------------ market context
+    def _on_vix(self, bar: dict) -> None:
+        if bar.get("close") is None or pd.isna(bar.get("close")):
+            return
+        vb = getattr(self, "_vix_bars", None)
+        if vb is None or vb.get("session") != bar.get("session"):
+            vb = self._vix_bars = {"session": bar.get("session"), "open": float(bar.get("open") or bar["close"]),
+                                   "bars": []}
+        vb["bars"].append((int(bar["ts"]), float(bar["close"])))
+
+    def market_context(self, bar: dict) -> dict:
+        """India VIX as of the minute BEFORE the decision bar (order-independent: a VIX bar of the same minute
+        may arrive just before or after the index bar). Missing VIX is recorded as None, never guessed."""
+        vb = getattr(self, "_vix_bars", None)
+        if not vb or vb.get("session") != self.session:
+            return {"vix": None}
+        cutoff = int(bar["ts"]) - 60
+        prior = [(t, c) for t, c in vb["bars"] if t <= cutoff]
+        if not prior:
+            return {"vix": None}
+        t, c = prior[-1]
+        return {"vix": c, "vix_bar_ts": t, "vix_chg_pct_session": round(100 * (c / vb["open"] - 1), 4)
+                if vb["open"] else None}
 
     # ------------------------------------------------------------------ steps
     def _data_gate(self, bar: dict) -> str | None:
@@ -137,7 +164,8 @@ class DecisionPipeline:
         cycle = c.cycle_key(self.session, self.cfg.profile)
         sel = select_contract(c.direction, bar["close"], ctx.now_ns, ctx.quotes(), self.cal, self.cfg.selection)
         base = {"features": c.features, "thesis": c.thesis, "invalidation": c.invalidation,
-                "selection": {"chosen": sel.features, "evaluated": sel.evaluated}, "data_label": self.cfg.data_label}
+                "selection": {"chosen": sel.features, "evaluated": sel.evaluated}, "data_label": self.cfg.data_label,
+                "market": self.market_context(bar)}
         if sel.key is None:
             self.risk.on_rejected_cycle(cycle)
             self._record(ctx.now_ns, c.strategy_id, c, "REJECTED", [sel.reason], cycle, payload=base)

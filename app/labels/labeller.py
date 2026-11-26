@@ -53,6 +53,8 @@ def label_features(sig: dict) -> dict:
     f |= {f"opt_{k}": v for k, v in chosen.items()
           if k in ("delta", "iv", "gamma", "theta_day", "theta_burn_pct_hr", "spread_pct", "bid", "ask",
                    "quote_age_s", "score", "eligible") and isinstance(v, (int, float))}
+    mkt = p.get("market") or {}
+    f |= {f"mkt_{k}": v for k, v in mkt.items() if k in ("vix", "vix_chg_pct_session") and isinstance(v, (int, float))}
     f |= {"minute_of_day": t.hour * 60 + t.minute, "dte": sig.get("dte"), "direction": sig.get("direction"),
           "strategy_id": sig.get("strategy_id")}
     return f

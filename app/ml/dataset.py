@@ -29,6 +29,7 @@ NUMERIC = (
     "cand_adx", "cand_rsi", "cand_ema_gap_atr", "cand_pullback_depth_atr",
     "opt_delta_abs", "opt_iv", "opt_gamma", "opt_theta_burn_pct_hr", "opt_spread_pct", "opt_quote_age_s",
     "opt_score", "opt_eligible", "opt_premium",
+    "mkt_vix", "mkt_vix_chg_pct_session",
 )
 CATEGORICAL = ("strategy_id",)
 OUTCOME_COLUMNS = ("label", "label_reason", "entry_ts", "entry_px", "exit_ts", "exit_px", "gross_pnl_per_lot",
@@ -42,7 +43,8 @@ def _derive(f: dict) -> dict:
            "cand_or_width_pct": g("cand_or_width_pct"), "cand_adx": g("cand_adx"), "cand_rsi": g("cand_rsi"),
            "opt_iv": g("opt_iv"), "opt_gamma": g("opt_gamma"), "opt_theta_burn_pct_hr": g("opt_theta_burn_pct_hr"),
            "opt_spread_pct": g("opt_spread_pct"), "opt_quote_age_s": g("opt_quote_age_s"),
-           "opt_score": g("opt_score"), "opt_eligible": g("opt_eligible"), "opt_premium": g("opt_ask")}
+           "opt_score": g("opt_score"), "opt_eligible": g("opt_eligible"), "opt_premium": g("opt_ask"),
+           "mkt_vix": g("mkt_vix"), "mkt_vix_chg_pct_session": g("mkt_vix_chg_pct_session")}
     close, atr = g("cand_close"), g("cand_atr")
     if close and atr:
         out["cand_atr_pct"] = 100 * atr / close

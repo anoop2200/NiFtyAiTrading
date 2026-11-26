@@ -222,7 +222,7 @@ class PaperSession:
         elif k == "b":
             if not self.started and r["s"] == "index":
                 self._open_risk_session(gap_ratio_from(self.spec.prior_daily or [], r["bar"]["open"]))
-            if self.started:
+            if self.started or r["s"] == "vix":
                 self.engine.on_bar(r["s"], r["bar"], r["t"])
                 self._alert_new_signals()
             else:

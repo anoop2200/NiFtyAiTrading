@@ -42,7 +42,9 @@ from app.research.spec import build_strategies
 def run_all(cfg, ds, days, cal, fees, events, run_id, research=None, latch_reset=True):
     """One continuous run of the default ORB + pullback configs (same simulator as Phase 6 experiments)."""
     idx = pg_spot_stream(cfg.path("derived"), days)
-    ctx = HistoryContext(cfg, ds, days, cal, fees, events, idx, gap_ratios(idx), day_quality(cfg))
+    from app.historical import vix as vixh
+    ctx = HistoryContext(cfg, ds, days, cal, fees, events, idx, gap_ratios(idx), day_quality(cfg),
+                         vix=vixh.load(cfg.path("historical"), days))
 
     def persist(_vid, day, broker, pipe, risk):
         persist_session(research, broker, run_id, day, mode="backtest")

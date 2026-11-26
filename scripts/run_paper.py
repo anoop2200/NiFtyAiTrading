@@ -114,7 +114,7 @@ def cmd_replay(a) -> int:
             reset_loss_latch("replay-operator-sim", "replay: reset at next session", commands=runtime / "commands",
                              log=OperatorLog(runtime / "operator_actions.jsonl"))
         open_session_row(db, s, code_fingerprint())
-        push(s, history_events(q, idx, tick_s=5.0))
+        push(s, history_events(q, idx, tick_s=5.0, vix_bars=ctx.vix_day(day)))
         print(_summary(day, closeout(db, s)))
     return 0
 
@@ -173,7 +173,8 @@ async def _live(a) -> int:
         s = PaperSession(spec, jp, fees, cal, events, kill_file=KILL_FILE, commands=COMMANDS, carry_file=CARRY,
                          notifier=notifier)
     open_session_row(db, s, code_fingerprint())
-    adapter = LiveAdapter(s, today, p.universe.index.security_id, future, p.universe.options)
+    adapter = LiveAdapter(s, today, p.universe.index.security_id, future, p.universe.options,
+                          vix_id=p.universe.vix.security_id if p.universe.vix else None)
     rec = Recorder(cfg, db, p, end_at, chain_enabled=not a.no_chain)
     rec.taps.append(adapter.on_rows)
 

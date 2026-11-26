@@ -22,9 +22,14 @@ from app.marketdata.normalize import Normalizer
 
 
 # ---------------------------------------------------------------------------------------------- history
-def history_events(quotes: list[Quote], index_bars: pd.DataFrame, tick_s: float = 5.0) -> list[tuple]:
-    """Ordered (ts_ns, kind, payload) events: quotes, bar closes, ticks. Equal timestamps: quote < tick < bar."""
+def history_events(quotes: list[Quote], index_bars: pd.DataFrame, tick_s: float = 5.0,
+                   vix_bars: pd.DataFrame | None = None) -> list[tuple]:
+    """Ordered (ts_ns, kind, payload) events: quotes, bar closes, ticks. Equal timestamps: quote < tick < bar
+    (and a VIX bar before the index bar of the same minute; the pipeline only uses VIX bars closed a minute
+    earlier, so this order cannot change a decision)."""
     ev = [(q.ts_ns, 0, i, "q", q) for i, q in enumerate(quotes)]
+    if vix_bars is not None and len(vix_bars):
+        ev += [((int(r["ts"]) + 60) * NS, 2, -1 - i, "v", r) for i, r in enumerate(vix_bars.to_dict("records"))]
     recs = index_bars.to_dict("records")
     ev += [((int(r["ts"]) + 60) * NS, 2, i, "b", r) for i, r in enumerate(recs)]
     if ev and tick_s:
@@ -45,6 +50,8 @@ def push(session, events, stop_after: int | None = None) -> int:
             session.quote(x)
         elif k == "b":
             session.bar("index", x, ts)
+        elif k == "v":
+            session.bar("vix", x, ts)
         else:
             session.tick(ts)
         n += 1
@@ -80,13 +87,15 @@ class LiveAdapter:
     options: dict                          # security_id -> universe Sub (expiry, strike, option_type); live view
     tf_s: int = 60
     grace_s: float = 2.0
+    vix_id: int | None = None
     norm: Normalizer = field(default_factory=Normalizer)
     errors: int = 0
     quotes: int = 0
     bars: int = 0
 
     def __post_init__(self):
-        self.bb = BarBuilder(tf_s=self.tf_s, grace_s=self.grace_s, index_ids={self.index_id})
+        self.bb = BarBuilder(tf_s=self.tf_s, grace_s=self.grace_s,
+                             index_ids={self.index_id} | ({self.vix_id} if self.vix_id else set()))
         self.session_open_ts = int(datetime.combine(self.today, datetime.min.time(), IST)
                                    .replace(hour=9, minute=15).timestamp())
 
@@ -115,14 +124,15 @@ class LiveAdapter:
                                      "observed_feed", True))
             self.quotes += 1
             return
-        if sid == self.index_id or sid == self.future_id:
+        if sid in (self.index_id, self.future_id) or (self.vix_id and sid == self.vix_id):
             self._bars(self.bb.on_event(ev), ev["recv_ns"])
 
     def _bars(self, rows: list[dict], now_ns: int) -> None:
         for b in rows:
             if b["open"] is None:
                 continue
-            stream = "index" if b["security_id"] == self.index_id else "future"
+            sid = b["security_id"]
+            stream = "index" if sid == self.index_id else ("vix" if self.vix_id and sid == self.vix_id else "future")
             bar = b | {"session": self.today.isoformat(), "session_open_ts": self.session_open_ts}
             self.session.bar(stream, bar, max(now_ns, (int(b["ts"]) + self.tf_s) * NS))
             self.bars += 1

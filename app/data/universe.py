@@ -34,12 +34,14 @@ class Universe:
     each_side: int
     buffer: int
     options: dict[int, Sub] = field(default_factory=dict)
+    vix: Sub | None = None
 
     def all(self) -> list[Sub]:
-        return [self.index, *self.futures, *self.options.values()]
+        return [self.index, *([self.vix] if self.vix else []), *self.futures, *self.options.values()]
 
     def describe(self) -> dict:
-        return {"index": self.index.security_id, "futures": [f.security_id for f in self.futures],
+        return {"index": self.index.security_id, "vix": self.vix.security_id if self.vix else None,
+                "futures": [f.security_id for f in self.futures],
                 "option_expiries": [d.isoformat() for d in self.option_expiries],
                 "strike_step": self.strike_step, "atm": self.atm, "options": len(self.options),
                 "each_side": self.each_side, "buffer": self.buffer}
@@ -84,7 +86,8 @@ def build_universe(sel: Selection, spot: float, today: date, each_side: int = 5,
     fut = sel.futures[sel.futures["expiry"].dt.date >= today].sort_values("expiry").head(futures_months)
     futures = [Sub("NSE_FNO", int(r.security_id), "full", "future", r.expiry.date().isoformat())
                for r in fut.itertuples(index=False)]
-    u = Universe(idx, futures, exps, step, atm, each_side, buffer)
+    vix = Sub("IDX_I", int(sel.vix["security_id"]), "ticker", "vix") if sel.vix else None
+    u = Universe(idx, futures, exps, step, atm, each_side, buffer, vix=vix)
     u.options = _option_subs(sel.options, exps, atm, step, each_side + buffer)
     return u
 

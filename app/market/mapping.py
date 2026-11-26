@@ -29,7 +29,7 @@ class Contract:
     tick_size: float | None = None
 
 
-ROLE = {"INDEX": "index", "FUTIDX": "future", "OPTIDX": "option"}
+ROLE = {"INDEX": "index", "FUTIDX": "future", "OPTIDX": "option", "VIX": "vix"}
 
 
 class InstrumentMap:

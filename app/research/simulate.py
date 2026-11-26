@@ -48,12 +48,19 @@ class HistoryContext:
     quality: dict
     fill: FillConfig = FILL
     label: str = LABEL
+    vix: pd.DataFrame | None = None      # India VIX 1-minute bars (decision context; None where not backfilled)
 
     @classmethod
     def load(cls, cfg, dataset: str, days: list[str]) -> "HistoryContext":
+        from app.historical import vix as vixh
         index = pg_spot_stream(cfg.path("derived"), days)
         return cls(cfg, dataset, days, TradingCalendar.load(), FeeSchedule.load(), EventCalendar.load(), index,
-                   gap_ratios(index), day_quality(cfg))
+                   gap_ratios(index), day_quality(cfg), vix=vixh.load(cfg.path("historical"), days))
+
+    def vix_day(self, day: str) -> pd.DataFrame | None:
+        if self.vix is None or not len(self.vix):
+            return None
+        return self.vix[self.vix["session"] == day]
 
     def day_path(self, day: str):
         return self.cfg.path("historical") / self.dataset / f"date={day}" / "part-0.parquet"
@@ -65,6 +72,8 @@ class HistoryContext:
             h.update(self.day_path(d).read_bytes())
         h.update(pd.util.hash_pandas_object(self.index[["ts", "open", "high", "low", "close"]],
                                             index=False).values.tobytes())
+        if self.vix is not None and len(self.vix):
+            h.update(pd.util.hash_pandas_object(self.vix[["ts", "close"]], index=False).values.tobytes())
         return {"dataset": self.dataset, "tier": TIER, "label": self.label, "sessions": len(self.days),
                 "first": self.days[0], "last": self.days[-1], "sha256": h.hexdigest(),
                 "quality_failed_days": sorted(d for d in self.days if not self.quality.get(d, (False,))[0])}
@@ -119,7 +128,9 @@ def simulate(ctx: HistoryContext, variants: dict[str, list], days: list[str] | N
                 risk.reset_consecutive_loss_latch("backtest-operator-sim", day)
             broker = PaperBroker(ctx.fill, ctx.fees, AuditLog())
             pipe.attach(broker)
-            ReplayEngine(broker, pipe, IndicatorEngine(pipe.bindings)).run({"index": index}, quotes)
+            vix = ctx.vix_day(day)
+            streams = ({"vix": vix} if vix is not None and len(vix) else {}) | {"index": index}
+            ReplayEngine(broker, pipe, IndicatorEngine(pipe.bindings)).run(streams, quotes)
             run.trades += [t | {"session": day} for t in broker.trades]
             run.signals += [s | {"session": day} for s in pipe.signals]
             run.heads.append(broker.audit.head)

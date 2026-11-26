@@ -181,8 +181,19 @@ provider evidently uses a different time-to-expiry convention. This matters beca
 **Decision (2026-11-26):** India VIX is the market volatility-level input for rules and regimes. Per-contract
 BSM IV is kept for Greeks only. Delta is effectively independent of the time convention, because the premium pins
 σ√T: shortening the 0DTE clock by 38% moved IV by ~4 vol points but ATM delta by < 0.005. Contract selection is
-therefore unaffected. `atm_iv` must not be compared across DTEs as a level. Still to build: an India VIX data
-stream (live feed + history backfill).
+therefore unaffected. `atm_iv` must not be compared across DTEs as a level.
+
+**India VIX stream (built 2026-11-26).** The instrument master's `INDIA VIX` row (IDX_I, security id 21) is stored
+as role `vix` (never confused with the NIFTY `index` role) and subscribed every session in ticker mode. The live
+adapter builds final 1-minute `vix` bars, which are journaled like every other engine input. History:
+`scripts/backfill_vix.py` pulls Dhan intraday candles (read-only data API) into
+`data/historical/india_vix/india_vix_1m.parquet`; all 59 history sessions are covered (`--coverage` to check).
+Backtests, experiments and paper replays load it automatically (it is part of the data fingerprint).
+Every strategy decision records `market.vix` (the VIX bar of the minute **before** the decision bar, so
+arrival order within a minute cannot change a decision; missing VIX is recorded as `None`, never guessed) and
+`market.vix_chg_pct_session`; labels carry them as `mkt_vix` / `mkt_vix_chg_pct_session` and both are on the
+meta-model's feature allow-list. **No rule uses VIX yet**: a VIX-based filter or regime is a new strategy
+variant and goes through a Phase 6 experiment first.
 
 **Approval (2026-11-26):** after the framework-hash change (`code_sha` now also covers `base.py` and the
 `Resampler`), all 19 indicators were revalidated (all pass). The 17 validated on real history were set APPROVED on
@@ -376,7 +387,9 @@ risk, pipeline or backtest code.
 Dry run on the history labels (research DB, horizon 15): 187 resolved candidates over 54 sessions, 104
 out-of-fold rows over 33 sessions. The model does **not** beat the baseline (Brier 0.296 vs 0.274, ECE 0.17) and
 loses money against rule-only (−6,077 per lot over the test folds) → `meta_v1 v1` RESEARCH_ONLY. Expected with
-this little data; it shows the guards work, not that a model is impossible.
+this little data; it shows the guards work, not that a model is impossible. Re-run with the two VIX
+features (`meta_v1 v2`): worse again (Brier 0.313, −11,233 per lot vs rule-only) — more features on 104 rows
+mostly add overfitting; VIX's value can only be judged on prospective data.
 
 **Still to do (needs data, not code):** ≥500 prospective labels (`run_paper.py labels` shows progress), then
 `train`, then — only for a CANDIDATE — operator approval, then shadow mode (log predictions next to rule-only
