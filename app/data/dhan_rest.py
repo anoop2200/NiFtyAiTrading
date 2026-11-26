@@ -105,6 +105,20 @@ class DhanRest:
                                  "instrument": instrument, "interval": interval, "oi": oi,
                                  "fromDate": from_dt, "toDate": to_dt})
 
+    async def rolling_option(self, underlying_id: int, expiry_flag: str, expiry_code: int, strike: str,
+                             option_type: str, from_date: str, to_date: str, interval: str = "1",
+                             required: tuple[str, ...] = ("open", "high", "low", "close", "iv", "volume", "strike",
+                                                          "oi", "spot"),
+                             segment: str = "NSE_FNO", instrument: str = "OPTIDX") -> RestResult:
+        """POST /charts/rollingoption — expired options, strike relative to ATM (e.g. ATM, ATM+1, ATM-2).
+        Read-only historical data API (OHLC / IV / OI / spot per minute; no bid/ask)."""
+        await self._gate.wait("charts", self.quote_interval_s)
+        return await self._call("POST", "/charts/rollingoption",
+                                {"exchangeSegment": segment, "interval": interval, "securityId": str(underlying_id),
+                                 "instrument": instrument, "expiryFlag": expiry_flag, "expiryCode": expiry_code,
+                                 "strike": strike, "drvOptionType": option_type, "requiredData": list(required),
+                                 "fromDate": from_date, "toDate": to_date})
+
 
 def extract_ltp(body: Any, segment: str, security_id: int) -> float | None:
     """Best-effort LTP extraction from /marketfeed/ltp: {"data": {SEG: {"<id>": {"last_price": x}}}}."""

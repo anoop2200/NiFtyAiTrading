@@ -53,10 +53,14 @@ def capital(engine: Engine, run_id: str) -> pd.DataFrame:
 
 def signals(engine: Engine, run_id: str, session_date: str | None = None) -> pd.DataFrame:
     sql = ("SELECT session_date, seq, ts, strategy_id, setup_id, direction, outcome, reasons, contract, dte, lots, "
-           "planned_r_inr, trade_id, risk_config_version FROM TradingSignals WHERE run_id = :r")
+           "planned_r_inr, trade_id, risk_config_version, payload FROM TradingSignals WHERE run_id = :r")
     if session_date:
         sql += " AND session_date = :d"
-    return q(engine, sql + " ORDER BY session_date, seq", r=run_id, d=session_date)
+    df = q(engine, sql + " ORDER BY session_date, seq", r=run_id, d=session_date)
+    if not df.empty:                      # India VIX as recorded with the decision (None where unavailable)
+        mkt = df.pop("payload").map(lambda x: (json.loads(x or "{}") or {}).get("market") or {})
+        df.insert(df.columns.get_loc("dte") + 1, "vix", mkt.map(lambda m: m.get("vix")))
+    return df
 
 
 def risk_events(engine: Engine, run_id: str) -> pd.DataFrame:
@@ -171,3 +175,105 @@ def notifications_tail(path: Path | None = None, n: int = 30) -> list[dict]:
 
 def now_ist() -> str:
     return datetime.now(IST).isoformat(timespec="seconds")
+
+
+# ---------------------------------------------------------------------------------------------- Phase 7 models
+def model_versions(engine: Engine) -> pd.DataFrame:
+    """Meta-model registry (schema v8): one row per version with its training run's gate and metrics."""
+    try:
+        df = q(engine, """SELECT v.id, v.model_name, v.version, v.status, v.status_reason, v.created_at, v.calibration,
+                                 v.approved_by, v.approved_at, v.artifact_sha256, r.horizon_min, r.rows, r.sessions,
+                                 r.first_session, r.last_session, r.data_tiers, r.metrics, r.gate
+                          FROM ModelVersions v JOIN ModelTrainingRuns r ON r.id = v.training_run_id
+                          ORDER BY v.model_name, v.version DESC""")
+    except Exception:  # noqa: BLE001 - tables appear with schema v8
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    m = df.pop("metrics").map(lambda x: json.loads(x or "{}"))
+    g = df.pop("gate").map(lambda x: json.loads(x or "{}"))
+    for k in ("brier_model", "brier_baseline", "ece_model", "net_improvement", "net_improvement_p05", "taken"):
+        df[k] = m.map(lambda d, k=k: d.get(k))
+    df["gate_passed"] = g.map(lambda d: d.get("passed"))
+    df["gate_failed"] = g.map(lambda d: ", ".join(k for k, v in (d.get("checks") or {}).items() if not v))
+    df["data_tiers"] = df["data_tiers"].map(lambda x: ", ".join(json.loads(x or "[]")))
+    return df
+
+
+def model_folds(engine: Engine, model_version_id: int) -> pd.DataFrame:
+    df = q(engine, """SELECT r.folds FROM ModelVersions v JOIN ModelTrainingRuns r ON r.id = v.training_run_id
+                      WHERE v.id = :i""", i=model_version_id)
+    if df.empty:
+        return df
+    rows = []
+    for f in json.loads(df.iloc[0]["folds"] or "[]"):
+        rows.append({"fold": f.get("fold"), "test": f"{f['test'][0]} .. {f['test'][1]} ({f['test'][2]})",
+                     "train_sessions": (f.get("fit") or [0, 0, 0])[2] + (f.get("calib") or [0, 0, 0])[2],
+                     **{k: f.get(k) for k in ("rows", "base_rate", "threshold", "brier", "brier_base", "taken",
+                                              "net_rule_only", "net_model", "skipped")}})
+    return pd.DataFrame(rows)
+
+
+def model_calibration(engine: Engine, model_version_id: int, bins: int = 10) -> pd.DataFrame:
+    """Out-of-fold reliability table: mean predicted P(win) vs observed win rate per probability bin."""
+    df = q(engine, "SELECT p_win, net_pnl_per_lot FROM ModelPredictions WHERE model_version_id = :i AND kind = 'oof'",
+           i=model_version_id)
+    if df.empty:
+        return df
+    df["win"] = (df["net_pnl_per_lot"] > 0).astype(int)
+    df["bin"] = (df["p_win"] * bins).clip(upper=bins - 1).astype(int)
+    out = df.groupby("bin").agg(predicted=("p_win", "mean"), observed=("win", "mean"), n=("win", "size")).reset_index()
+    out["range"] = out["bin"].map(lambda b: f"{b / bins:.1f}-{(b + 1) / bins:.1f}")
+    return out[["range", "predicted", "observed", "n"]].round(3)
+
+
+# ---------------------------------------------------------------------------------------------- India VIX
+def vix_daily() -> pd.DataFrame:
+    from app.historical import vix as vixh
+    df = vixh.load(settings().path("historical"))
+    if df.empty:
+        return df
+    return (df.groupby("session").agg(open=("open", "first"), high=("high", "max"), low=("low", "min"),
+                                      close=("close", "last"), bars=("close", "size")).reset_index())
+
+
+def vix_intraday(day: str) -> pd.DataFrame:
+    from app.historical import vix as vixh
+    df = vixh.load(settings().path("historical"), [day])
+    if df.empty:
+        return df
+    df["time"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(IST).dt.strftime("%H:%M")
+    return df[["time", "open", "high", "low", "close"]]
+
+
+# ---------------------------------------------------------------------------------------------- OI-03 research tier
+def rolling_coverage() -> dict:
+    from app.historical import rolling_options as ro
+    root = settings().path("historical")
+    m = ro.read_manifest(root)
+    cov = ro.coverage(root)
+    days = pd.DataFrame([{"day": d, **{k: v.get(k) for k in ("status", "rows", "series")}}
+                         for d, v in m.get("days", {}).items()])
+    if not days.empty:
+        days["month"] = days["day"].str[:7]
+        by_month = (days.groupby("month").agg(trading_days=("status", lambda s: int((s == "ok").sum())),
+                                              holidays_or_empty=("status", lambda s: int((s == "empty").sum())),
+                                              errors=("status", lambda s: int((s == "error").sum())),
+                                              rows=("rows", "sum")).reset_index())
+    else:
+        by_month = pd.DataFrame()
+    exp = pd.DataFrame([{"day": d, "series": k, **v} for d, per in m.get("expiries", {}).items()
+                        for k, v in per.items()])
+    return {"coverage": cov, "by_month": by_month, "expiries": exp,
+            "expiry_problems": pd.DataFrame((m.get("expiry_check") or {}).get("problems") or []),
+            "days": sorted(days.loc[days["status"] == "ok", "day"]) if not days.empty else []}
+
+
+def rolling_day(day: str) -> pd.DataFrame:
+    """One research-tier day: ATM±5 close per minute and type (trade prices; no bid/ask)."""
+    from app.historical import rolling_options as ro
+    df = ro.load_day(settings().path("historical"), day)
+    if df.empty:
+        return df
+    df["time"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(IST).dt.strftime("%H:%M")
+    return df

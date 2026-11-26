@@ -111,6 +111,31 @@ def page_market():
     m[4].metric("Quality flags", meta["rows_flagged"])
     st.dataframe(wide, width="stretch", hide_index=True)
     st.caption(f"tier: {meta['tier']} · {meta['snapshots_in_day']} snapshots that day")
+    _vix_section(day)
+
+
+def _vix_section(day: str):
+    st.subheader("India VIX")
+    st.caption("Market volatility-level input (owner decision 2026-11-26). Recorded with every decision as the VIX "
+               "bar of the minute before the decision bar; no rule uses it yet. History: Dhan intraday candles.")
+    daily = D.vix_daily()
+    if daily.empty:
+        st.info("No India VIX history — run scripts\backfill_vix.py.")
+        return
+    intr = D.vix_intraday(day)
+    m = st.columns(4)
+    if not intr.empty:
+        m[0].metric(f"VIX close {day}", f"{intr['close'].iloc[-1]:.2f}",
+                    f"{intr['close'].iloc[-1] - intr['open'].iloc[0]:+.2f} on the day")
+        m[1].metric("Day range", f"{intr['low'].min():.2f} – {intr['high'].max():.2f}")
+    m[2].metric("History", f"{len(daily)} sessions")
+    m[3].metric("Range over history", f"{daily['low'].min():.2f} – {daily['high'].max():.2f}")
+    c = st.columns(2)
+    if not intr.empty:
+        c[0].caption(f"Intraday {day} (1-minute close)")
+        c[0].line_chart(intr.set_index("time")["close"], height=220)
+    c[1].caption("Daily close")
+    c[1].line_chart(daily.set_index("session")["close"], height=220)
 
 
 def page_signals():
@@ -224,9 +249,77 @@ def page_research():
                 st.caption("Only prospective live-feed labels (data_tier observed_feed) count toward the 500-label "
                            "training threshold; history-tier labels exercise the pipeline.")
                 st.dataframe(ls, width="stretch", hide_index=True)
+    for name in ("main", "research"):
+        if name in engs:
+            _models_section(engs[name], name)
+    _rolling_section()
     if "main" in engs:
         st.subheader("Indicator registry")
         st.dataframe(D.indicators(engs["main"]), width="stretch", hide_index=True)
+
+
+def _models_section(eng, name: str):
+    mv = D.model_versions(eng)
+    if mv.empty:
+        return
+    st.subheader(f"Meta-model registry — Phase 7 ({name} DB)")
+    st.caption("RESEARCH_ONLY = trained on history-tier labels or failed the promotion gate; never approvable. "
+               "CANDIDATE = every gate check passed, awaiting operator approval (CLI: train_meta_model.py approve). "
+               "No model is in the trading path.")
+    cols = ["id", "model_name", "version", "status", "horizon_min", "rows", "sessions", "data_tiers", "brier_model",
+            "brier_baseline", "ece_model", "net_improvement", "net_improvement_p05", "gate_passed", "created_at"]
+    st.dataframe(mv[cols], width="stretch", hide_index=True)
+    pick = st.selectbox("Model version", mv["id"].tolist(), key=f"mv_{name}",
+                        format_func=lambda i: f"{mv.loc[mv['id'] == i, 'model_name'].iloc[0]} "
+                                              f"v{mv.loc[mv['id'] == i, 'version'].iloc[0]}")
+    row = mv[mv["id"] == pick].iloc[0]
+    if row["status_reason"]:
+        st.warning(row["status_reason"])
+    if row["gate_failed"]:
+        st.caption(f"Failed gate checks: {row['gate_failed']}")
+    c = st.columns(2)
+    c[0].caption("Walk-forward folds (test blocks are later sessions than everything the fold trained on)")
+    c[0].dataframe(D.model_folds(eng, int(pick)), width="stretch", hide_index=True)
+    cal = D.model_calibration(eng, int(pick))
+    c[1].caption("Out-of-fold calibration: predicted P(win) vs observed win rate")
+    if not cal.empty:
+        c[1].dataframe(cal, width="stretch", hide_index=True)
+        c[1].line_chart(cal.set_index("range")[["predicted", "observed"]], height=200)
+
+
+def _rolling_section():
+    r = D.rolling_coverage()
+    cov = r["coverage"]
+    if not cov.get("days_requested"):
+        return
+    st.subheader("Expired-option history — Dhan rolling options (OI-03, research tier)")
+    st.caption("1-minute TRADE prices (no bid/ask) for ATM±5 of the near weekly expiry; strike relative to ATM, "
+               "re-evaluated every minute. v1.3 §18: never used for fills, promotion or hold-outs — pre-screening "
+               "and regime research only. Expiries are inferred (implied time-to-expiry + expiry weekday + holidays).")
+    m = st.columns(5)
+    m[0].metric("Trading days", cov["trading_days"])
+    m[1].metric("Holidays / empty", cov["empty_days"])
+    m[2].metric("Range", f"{cov['first'][:7]} → {cov['last'][:7]}" if cov["first"] else "—",
+                help=f"{cov['first']} → {cov['last']}" if cov["first"] else None)
+    m[3].metric("Rows", f"{cov['rows']:,}")
+    m[4].metric("Expiry check problems", "not finalized" if not cov["finalized"] else cov["expiry_problems"])
+    c = st.columns(2)
+    c[0].caption("Coverage by month")
+    c[0].dataframe(r["by_month"], width="stretch", hide_index=True)
+    if not r["expiries"].empty:
+        e = r["expiries"]
+        c[1].caption("Inferred expiries (DTE distribution of the near weekly series)")
+        c[1].bar_chart(e["dte"].value_counts().sort_index(), height=200)
+        if not r["expiry_problems"].empty:
+            st.dataframe(r["expiry_problems"], width="stretch", hide_index=True)
+    if r["days"]:
+        day = st.selectbox("Inspect a day", r["days"][::-1], key="ro_day")
+        df = D.rolling_day(day)
+        if not df.empty:
+            exp = df["expiry"].dropna().iloc[0] if df["expiry"].notna().any() else "not inferred"
+            st.caption(f"expiry {exp} · spot {df['spot'].iloc[0]:,.2f} → {df['spot'].iloc[-1]:,.2f}")
+            atm = df[df["rel_strike"] == 0].pivot_table(index="time", columns="option_type", values="close")
+            st.line_chart(atm, height=220)
 
 
 def page_config():

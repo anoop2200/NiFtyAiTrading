@@ -346,6 +346,11 @@ Phase 7 (ML) was first deferred; its training stack is now built (see the Phase 
 .venv\Scripts\python scripts\set_secret.py TELEGRAM_BOT_TOKEN      # and TELEGRAM_CHAT_ID, to send for real
 ```
 
+Dashboard additions (2026-11-26): India VIX (intraday + daily history) on Market monitor; the VIX recorded with
+each decision on Signals; the meta-model registry (versions, failed gate checks, walk-forward folds, out-of-fold
+calibration) and the expired-option research tier (coverage, inferred expiries, per-day ATM CE/PE chart) on
+Backtests & research. `.claude/launch.json` starts it for the desktop app's browser pane.
+
 Until Phase 9 runs the live paper engine, the dashboard and report read the backtest runs in the research DB, and
 the market monitor shows the imported history chain (labelled as such). The risk validator now also bounds the
 UI-editable fields (`zero_dte.max_entries >= 0`, `cooldown_after_stop_min >= 0`, 0DTE last entry no later than
@@ -455,6 +460,47 @@ live` day is the real test of the adapter, the watchdog thresholds and the journ
 | Same code as backtest | `test_stream_engine_equals_replay_engine`, `test_clock_ticks_do_not_change_results`, `test_real_history_paper_engine_equals_backtest` |
 | Kill switch / operator commands | `test_manual_kill_is_journaled_blocks_next_decision_and_replays`, `test_ack_and_latch_reset_commands_are_consumed_and_journaled`, `test_latch_reset_in_same_session_is_refused`, `test_feed_outage_watchdog` |
 | Labels (Phase 7 data track) | `test_every_candidate_is_labelled_including_counterfactuals`, `test_label_matches_broker_trade_when_exits_coincide`, `test_labels_without_contract_or_after_close`, `test_adequacy_counts_only_prospective_labels` |
+
+## OI-03 — expired NIFTY option history from Dhan (probe 2026-11-26)
+
+`scripts/probe_rolling_options.py` (read-only data API `/charts/rollingoption`; raw responses in
+`data/derived/oi03_probe/`, summary in `data/reports/oi03_rolling_options_probe.json`).
+
+| Question | Finding |
+|---|---|
+| How far back? | Every probe from 1 week to 5 years back returned data; the oldest probed day, **2021-09-13**, has a full session (Dhan states 5 years) |
+| Weekly / monthly | Both `WEEK` and `MONTH`, near (`expiryCode` 1) and next (2) expiry |
+| Strikes | Relative to ATM, re-evaluated every minute (57 strike changes on 2026-11-25): **ATM±10** for near-expiry index options; `ATM+11` returns nothing. Not a fixed contract series |
+| Fields | 1-minute open/high/low/close, volume, OI, IV, spot, strike — **no bid/ask, no depth** |
+| Date range | `toDate` is effectively inclusive: a `fromDate`=D, `toDate`=D+1 request returns both days; bars run to 15:39 |
+| Agreement with our PG snapshot history (2026-11-25) | Spot: 375 common minutes, mean abs diff 1.96 pts (max 13.6). ATM CE close vs PG option bars: mean abs diff 1.4 (median 1.0, p95 4.5) on a ~220 premium; the Dhan close sat inside the PG bid/ask only 22% of the time (last trade vs sampled quote; PG mean spread 0.52) |
+
+**What it means.** Five years of minute option prices would turn 59 research sessions into ~1,200. But the
+data is trade prices only. §18 forbids LTP-only fills and invented bid/ask, so it **cannot replace the
+quote-based backtest**. It is usable, under its own data tier (`dhan_rolling_option_ltp`), for:
+- strategy *pre-screening* with an explicit, labelled spread model (calibrated from recorded spreads, OI-12),
+  whose results never count as evidence for promotion
+- regime / indicator research on spot + IV + OI over many market conditions (2021-2026, incl. high-VIX periods)
+- candidate-level features for long-horizon studies
+
+It does **not** solve futures history (options only); expired futures would need a separate probe.
+OI-03 status: **answered**.
+
+**Imported (owner decision 2026-11-26: one year).** `scripts/import_rolling_options.py fetch --from 2025-11-26
+--to 2026-11-25` → 245 trading days (16 weekday holidays came back empty), 2,021,030 rows: ATM±5 CE+PE of the
+near weekly expiry, one file per day under `data/historical/dhan_rolling_options/` (gitignored), resumable
+via a manifest. The response has no expiry date; `finalize` infers it from the time-to-expiry implied by Dhan's
+own IV plus the expiry weekday (Thursday before 2025-09-01, Tuesday after) and a holiday shift taken from the
+days that had no trading. Result: 53 weekly expiries, 6 of them Mondays (Tuesday holidays: 3 Mar, 31 Mar,
+14 Apr, 20 Oct, 10 Nov, 24 Nov 2026), 0 consistency problems. `validate` against the 59 PG snapshot days:
+**expiry 59/59 correct**; matched option closes differ from the PG snapshot close by median 0.43% (p95 2.7%).
+Tier `dhan_rolling_option_ltp`; a test forbids any import of it from the engine, strategies, risk, pipeline,
+backtest or research (experiment) code. Dashboard: Backtests & research → "Expired-option history".
+
+```
+.venv\Scripts\python scripts\import_rolling_options.py fetch --from D --to D [--each-side 5]
+.venv\Scripts\python scripts\import_rolling_options.py finalize | coverage | validate
+```
 
 ## Single-writer note
 
