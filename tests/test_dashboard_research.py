@@ -75,3 +75,49 @@ def test_rolling_views(tmp_path, monkeypatch):
     assert r["by_month"].iloc[0]["holidays_or_empty"] == 1 and set(r["expiries"]["series"]) == {"WEEK1"}
     d = D.rolling_day(day)
     assert set(d["option_type"]) == {"CE", "PE"} and d["time"].iloc[0] == "09:15" and d["expiry"].notna().all()
+
+
+def test_live_journal_incremental_and_chain(tmp_path):
+    import json as _j
+    from app.dashboard import data as D
+    p = tmp_path / "2026-11-27.jsonl"
+    t0 = 1795751520 * 10**9
+    recs = [{"k": "start", "at": "2026-11-27T09:21:58+05:30"},
+            {"k": "b", "s": "index", "bar": {"ts": 1795751520, "open": 1, "high": 2, "low": 0.5, "close": 25810.0}}]
+    for i, strike in enumerate(range(25500, 26150, 50)):
+        for ot in ("CE", "PE"):
+            recs.append({"k": "q", "t": t0 + i, "key": f"NIFTY|2026-12-01|{strike}|{ot}", "b": [[100.0, 65]],
+                         "a": [[100.5, 65]], "l": 100.2})
+    p.write_text("\n".join(_j.dumps(r) for r in recs) + "\n" + '{"k":"q","t":1', encoding="utf-8")  # partial tail
+    j = D.LiveJournal(p).refresh()
+    assert j.records == len(recs) and len(j.quotes) == 26
+    wide, meta = D.live_chain(j, now_ns=t0 + 2 * 10**9)
+    assert meta["atm"] == 25800 and meta["spot"] == 25810.0 and len(wide) == 11
+    assert wide["CE_spread"].iloc[0] == 0.5 and 1.9 <= wide["CE_age_s"].iloc[0] <= 2.0
+    with open(p, "a", encoding="utf-8") as f:                # the partial line completes; one new record
+        f.write('000,"key":"NIFTY|2026-12-01|25800|CE","b":[[90.0,65]],"a":[[91.0,65]],"l":90.5}\n')
+    j.refresh()
+    assert j.records == len(recs) + 1 and j.quotes["NIFTY|2026-12-01|25800|CE"]["l"] == 90.5
+    assert list(D.live_bars(j, "index")["close"]) == [25810.0] and D.live_bars(j, "vix").empty
+
+
+def test_closed_day_is_detected_and_read_from_db(tmp_path, monkeypatch):
+    """After the 15:35 closeout the journal is gzipped: the Live page must show the day as CLOSED, not 'not started'."""
+    import pandas as pd
+    from app.dashboard import data as D
+    p = tmp_path / "2026-11-27.jsonl"
+    monkeypatch.setattr(D, "live_journal_path", lambda day, run_id=None: p)
+    assert not D.live_journal_closed("2026-11-27")             # nothing yet
+    p.write_text("{}\n")
+    assert not D.live_journal_closed("2026-11-27")             # running
+    p.unlink()
+    (tmp_path / "2026-11-27.jsonl.gz").write_bytes(b"")
+    assert D.live_journal_closed("2026-11-27")                 # closed out
+    tr = pd.DataFrame({"session_date": ["2026-11-26", "2026-11-27"], "net_pnl": [1.0, 2.0]})
+    ps = pd.DataFrame({"session_date": ["2026-11-27"], "run_id": ["r1"], "status": ["COMPLETED"]})
+    monkeypatch.setattr(D, "trades", lambda e, r: tr)
+    monkeypatch.setattr(D, "signals", lambda e, r, d=None: pd.DataFrame({"x": [1]}))
+    monkeypatch.setattr(D, "paper_sessions", lambda e: ps)
+    d = D.closed_day(None, "2026-11-27", "r1")
+    assert list(d["trades"]["net_pnl"]) == [2.0] and d["session"]["status"] == "COMPLETED" and len(d["signals"]) == 1
+    assert D.closed_day(None, "2026-11-27", "other")["session"] is None

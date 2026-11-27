@@ -61,3 +61,17 @@ def test_verify_detects_gap_and_late_start(tmp_path):
     assert not res["passed"]
     assert res["checks"]["covers_market_open"] is False
     assert res["checks"]["no_gap_over_60s"] is False
+
+
+def test_verify_restart_runs_number_seq_independently(tmp_path, monkeypatch):
+    """A restart/recovery starts a new recorder process whose seq begins at 1 again: not a duplicate (2026-11-27)."""
+    import os
+    day = "2026-11-26"
+    for pid, (start, end) in ((111, ((9, 14, 0), (11, 0, 0))), (222, ((11, 0, 2), (15, 31, 0)))):
+        monkeypatch.setattr(os, "getpid", lambda pid=pid: pid)
+        w = PartitionedWriter(tmp_path, "feed", FEED_SCHEMA, flush_rows=20000)
+        w.add_many(_rows(day, start, end, step_s=2))          # each run numbers seq from 1
+        w.close()
+    res = verify_day(tmp_path, day)
+    assert res["passed"], res["checks"]
+    assert [r["pid"] for r in res["recorder_runs"]] == ["111", "222"]

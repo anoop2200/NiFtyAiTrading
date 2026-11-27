@@ -4,13 +4,15 @@ from __future__ import annotations
 from datetime import datetime, time as dtime
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.parquet as pq
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from app.clock import IST
-from app.data.parquet_store import read_stream
+from app.data.parquet_store import read_stream, stream_runs
 from app.database.models import Instruments
 
 IST_OFFSET_S = 19800
@@ -29,11 +31,23 @@ def verify_day(root: Path, day: str, engine: Engine | None = None, market_open: 
     n = feed.num_rows
     out["feed_rows"] = n
 
-    order = pc.sort_indices(feed, sort_keys=[("seq", "ascending")])
-    seq = pc.take(feed["seq"], order).to_pylist()
-    recv = pc.take(feed["recv_ns"], order).to_pylist()
-    checks["seq_unique"] = len(set(seq)) == n
-    checks["recv_monotonic_with_seq"] = all(b >= a for a, b in zip(recv, recv[1:]))
+    # seq is per recorder process: a restart / crash recovery starts a new run numbered from 0 again
+    seq_ok, mono_ok, recv = True, True, []
+    out["recorder_runs"] = []
+    for pid, files in stream_runs(root, day, "feed").items():
+        t = pa.concat_tables([pq.read_table(f) for f in files])
+        order = pc.sort_indices(t, sort_keys=[("seq", "ascending")])
+        s = pc.take(t["seq"], order).to_pylist()
+        r = pc.take(t["recv_ns"], order).to_pylist()
+        seq_ok &= len(set(s)) == t.num_rows
+        mono_ok &= all(b >= a for a, b in zip(r, r[1:]))
+        recv += r
+        out["recorder_runs"].append({"pid": pid, "rows": t.num_rows, "files": len(files),
+                                     "from": datetime.fromtimestamp(r[0] / 1e9, IST).isoformat() if r else None,
+                                     "to": datetime.fromtimestamp(r[-1] / 1e9, IST).isoformat() if r else None})
+    recv.sort()
+    checks["seq_unique"] = seq_ok
+    checks["recv_monotonic_with_seq"] = mono_ok
 
     out["packets_by_code"] = {str(x["values"]): x["counts"] for x in pc.value_counts(feed["code"]).to_pylist()}
     perr = pc.sum(pc.cast(pc.fill_null(feed["parse_error"], False), "int64")).as_py() or 0

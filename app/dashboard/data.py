@@ -277,3 +277,179 @@ def rolling_day(day: str) -> pd.DataFrame:
         return df
     df["time"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(IST).dt.strftime("%H:%M")
     return df
+
+
+# ---------------------------------------------------------------------------------------------- live journal view
+class LiveJournal:
+    """Incremental READ-ONLY reader of the paper engine's journal (data/paper/<run>/<day>.jsonl).
+
+    The live journal grows all day (100+ MB), so each refresh reads only the bytes appended since the last one,
+    up to the last complete line, and keeps the latest quote per contract and the 1-minute bars per stream. The
+    file is opened read-only; the engine stays the single writer."""
+
+    def __init__(self, path: Path):
+        self.path, self.offset = Path(path), 0
+        self.quotes: dict[str, dict] = {}
+        self.bars: dict[str, list[dict]] = {}
+        self.last_t, self.records, self.started, self.ended = 0, 0, None, False
+        self._lock = __import__("threading").Lock()       # shared by every browser tab's thread
+
+    def refresh(self) -> "LiveJournal":
+        with self._lock:
+            return self._refresh()
+
+    def _refresh(self) -> "LiveJournal":
+        if not self.path.exists():
+            return self
+        with open(self.path, "rb") as f:
+            f.seek(self.offset)
+            chunk = f.read()
+        end = chunk.rfind(b"\n")
+        if end < 0:
+            return self
+        self.offset += end + 1
+        for line in chunk[:end].splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            self.records += 1
+            k = r.get("k")
+            if r.get("t"):
+                self.last_t = max(self.last_t, int(r["t"]))
+            if k == "q":
+                self.quotes[r["key"]] = r
+            elif k == "b":
+                self.bars.setdefault(r.get("s") or "?", []).append(r["bar"])
+            elif k == "start":
+                self.started = r.get("at")
+            elif k == "end":
+                self.ended = True
+        return self
+
+
+_LIVE: dict[str, LiveJournal] = {}
+
+
+def paper_run_id() -> str:
+    from app.config import PROJECT_ROOT
+    return yaml.safe_load((PROJECT_ROOT / "config" / "paper.yaml").read_text(encoding="utf-8"))["run_id"]
+
+
+def live_journal_path(day: str, run_id: str | None = None) -> Path:
+    from app.config import PROJECT_ROOT
+    return PROJECT_ROOT / "data" / "paper" / (run_id or paper_run_id()) / f"{day}.jsonl"
+
+
+def live_journal_closed(day: str, run_id: str | None = None) -> bool:
+    """True once the day's journal was closed out: the engine gzips it at 15:35 and removes the plain file."""
+    p = live_journal_path(day, run_id)
+    return not p.exists() and Path(str(p) + ".gz").exists()
+
+
+def closed_day(engine: Engine, day: str, run_id: str | None = None) -> dict:
+    """The persisted results of a closed paper day (what closeout wrote to the main database)."""
+    run = run_id or paper_run_id()
+    tr = trades(engine, run)
+    tr = tr[tr["session_date"] == day] if not tr.empty else tr
+    ps = paper_sessions(engine)
+    ps = ps[(ps["session_date"] == day) & (ps["run_id"] == run)] if not ps.empty else ps
+    return {"run_id": run, "trades": tr, "signals": signals(engine, run, day),
+            "session": ps.iloc[0].to_dict() if len(ps) else None}
+
+
+def live_journal(day: str, run_id: str | None = None) -> LiveJournal:
+    p = live_journal_path(day, run_id)
+    with _SHADOW_LOCK:
+        j = _LIVE.get(str(p))
+        if j is None or (p.exists() and p.stat().st_size < j.offset):    # new or rewritten file
+            j = _LIVE[str(p)] = LiveJournal(p)
+    return j.refresh()
+
+
+def live_chain(j: LiveJournal, now_ns: int | None = None, each_side: int = 5) -> tuple[pd.DataFrame, dict]:
+    """ATM±each_side chain from the latest journal quotes of the nearest expiry (top of book + LTP + age)."""
+    import time as _t
+    now_ns = now_ns or _t.time_ns()
+    idx = j.bars.get("index") or []
+    spot = float(idx[-1]["close"]) if idx else None
+    rows = []
+    for key, r in j.quotes.items():
+        try:
+            _, expiry, strike, ot = key.split("|")
+        except ValueError:
+            continue
+        b, a = (r.get("b") or [[None, 0]])[0], (r.get("a") or [[None, 0]])[0]
+        rows.append({"expiry": expiry, "strike": float(strike), "type": ot, "bid": b[0], "bid_qty": b[1],
+                     "ask": a[0], "ask_qty": a[1], "ltp": r.get("l"), "age_s": round((now_ns - r["t"]) / 1e9, 1)})
+    meta = {"spot": spot, "atm": None, "expiry": None, "quotes": len(j.quotes), "records": j.records,
+            "last_event_age_s": round((now_ns - j.last_t) / 1e9, 1) if j.last_t else None,
+            "started": j.started, "ended": j.ended, "bar_streams": {s: len(v) for s, v in j.bars.items()}}
+    if not rows:
+        return pd.DataFrame(), meta
+    df = pd.DataFrame(rows)
+    expiry = sorted(df["expiry"].unique())[0]
+    df = df[df["expiry"] == expiry]
+    strikes = sorted(df["strike"].unique())
+    ref = spot if spot is not None else strikes[len(strikes) // 2]
+    atm = min(strikes, key=lambda s: abs(s - ref))
+    i = strikes.index(atm)
+    keep = strikes[max(0, i - each_side): i + each_side + 1]
+    df = df[df["strike"].isin(keep)]
+    df["spread"] = (df["ask"] - df["bid"]).round(2)
+    wide = df.pivot_table(index="strike", columns="type", values=["bid", "ask", "ltp", "spread", "age_s"],
+                          aggfunc="last")
+    wide.columns = [f"{t}_{v}" for v, t in wide.columns]
+    cols = [c for c in ("CE_age_s", "CE_spread", "CE_bid", "CE_ask", "CE_ltp") if c in wide] + \
+           [c for c in ("PE_ltp", "PE_bid", "PE_ask", "PE_spread", "PE_age_s") if c in wide]
+    meta.update(atm=atm, expiry=expiry)
+    return wide[cols].reset_index(), meta
+
+
+def live_bars(j: LiveJournal, stream: str) -> pd.DataFrame:
+    b = j.bars.get(stream) or []
+    if not b:
+        return pd.DataFrame(columns=["time", "open", "high", "low", "close"])
+    df = pd.DataFrame(b)
+    df["time"] = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(IST).dt.strftime("%H:%M")
+    return df[["time", "open", "high", "low", "close"]]
+
+
+# ---------------------------------------------------------------------------------------------- live session shadow
+_SHADOW: dict[str, object] = {}
+_SHADOW_RETRIED: dict[str, str] = {}
+_SHADOW_LOCK = __import__("threading").Lock()
+
+
+def live_shadow(day: str, run_id: str | None = None):
+    """Muted journal replay of today's paper session (app.engine.shadow), cached and refreshed incrementally."""
+    from app.engine.shadow import ShadowSession
+    p = live_journal_path(day, run_id)
+    with _SHADOW_LOCK:
+        sh = _SHADOW.get(str(p))
+        if sh is not None and sh.error and not _SHADOW_RETRIED.get(str(p)):
+            _SHADOW_RETRIED[str(p)] = sh.error                # one clean rebuild; a repeat failure stays visible
+            sh = None
+        if sh is None or (p.exists() and p.stat().st_size < sh.offset):
+            sh = _SHADOW[str(p)] = ShadowSession(p)
+    return sh.refresh()
+
+
+def engine_state_label(day: str) -> tuple[str, str]:
+    """(icon+text, detail) for the sidebar: manual kill file + the running engine's automatic latch (shadow)."""
+    ks = __import__("app.control.actions", fromlist=["kill_status"]).kill_status()
+    if ks["manual"]:
+        return "🛑 SAFE (kill switch on)", "manual kill switch"
+    if live_journal_path(day).exists():
+        st = live_shadow(day).state()
+        auto = (st.get("kill") or {}).get("auto")
+        if auto and not auto.get("acked_by"):
+            return "🛑 ENTRIES BLOCKED", f"automatic kill: {auto.get('reason')} — {auto.get('detail')}"
+        if st.get("error") or st.get("mismatches"):
+            return "⚠️ CHECK ENGINE", st.get("error") or "shadow replay does not match engine checkpoints"
+        age = st.get("last_event_age_s")
+        if not st.get("ended") and age is not None and age > 30:
+            return "⚠️ ENGINE SILENT", f"no journal event for {age:.0f}s"
+    elif live_journal_closed(day):
+        return "⏹ CLOSED", f"session {day} closed out"
+    return "🟢 ACTIVE", ""

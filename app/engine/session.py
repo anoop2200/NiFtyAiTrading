@@ -115,6 +115,7 @@ class PaperSession:
         self.engine = StreamEngine(self.broker, self.pipe, IndicatorEngine(self.pipe.bindings))
         self.applied = 0
         self.last_quote_ns: int | None = None
+        self._watch_from_ns: int | None = None
         self.started = False                               # risk session opened (needs gap ratio)
         self.incidents: list[dict] = []
         self.kill_seen = {"manual": False, "emergency_close": False}
@@ -239,7 +240,10 @@ class PaperSession:
             self._command(r["cmd"], r["t"])
         elif k == "ck":
             return
-        elif k in ("start", "end", "recovered"):
+        elif k == "recovered":
+            self._watch_from_ns = None                 # the engine was down: re-anchor the feed watchdog on restart
+            return
+        elif k in ("start", "end"):
             return
         else:
             raise ValueError(f"unknown journal record {k}")
@@ -272,7 +276,10 @@ class PaperSession:
             return
         day = datetime.fromtimestamp(now_ns / NS, IST).date()
         open_ns = int(datetime.combine(day, dtime.fromisoformat(self.spec.market_open), IST).timestamp()) * NS
-        age = (now_ns - max(self.last_quote_ns or 0, open_ns)) / NS     # pre-open quiet is not an outage
+        if self._watch_from_ns is None:                 # first in-market watchdog tick of this engine process:
+            self._watch_from_ns = now_ns                # a late start is not a feed outage (deterministic: journaled t)
+        # pre-open quiet and the time before the engine ran are not outages
+        age = (now_ns - max(self.last_quote_ns or 0, open_ns, self._watch_from_ns)) / NS
         if age > self.spec.feed_outage_s and (self.kill.auto is None or self.kill.auto.get("acked_by")):
             self.kill.trip("FEED_OUTAGE", f"no option quote for {age:.0f}s")
             self.risk._event("auto_kill", {"reason": "FEED_OUTAGE", "age_s": round(age, 1)})
@@ -325,8 +332,10 @@ class PaperSession:
         s._signals_alerted = len(s.pipe.signals)
         restarts = sum(r["k"] == "recovered" for r in recs) + 1
         ok = not mismatches and AuditLog.verify(s.broker.audit.records)
-        s._write({"k": "recovered", "at": iso(), "events": s.applied, "head": s.broker.audit.head, "ok": ok,
-                  "restart": restarts})
+        rec = {"k": "recovered", "at": iso(), "events": s.applied, "head": s.broker.audit.head, "ok": ok,
+               "restart": restarts}
+        s._write(rec)
+        s._apply(rec)                                  # downtime before this restart is not a feed outage
         s.recovery = {"events": s.applied, "checkpoints_failed": mismatches, "audit_valid": ok, "restart": restarts,
                       "open_trades": sorted(s.broker.open_trade_ids())}
         if not ok:

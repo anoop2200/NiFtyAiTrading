@@ -21,6 +21,9 @@ import pandas as pd  # noqa: E402
 import plotly.express as px  # noqa: E402
 import streamlit as st  # noqa: E402
 
+from datetime import datetime  # noqa: E402
+
+from app.clock import IST  # noqa: E402
 from app.control import actions  # noqa: E402
 from app.dashboard import data as D  # noqa: E402
 from app.notify.telegram import Notifier, kill_switch_alert, make_transport  # noqa: E402
@@ -89,8 +92,21 @@ def page_home():
 
 def page_market():
     st.header("Market monitor")
-    st.caption("Live feed arrives with Phase 9 paper trading. Until then this shows the imported HISTORY chain "
-               "(PostgreSQL top-of-book snapshots), ATM±5.")
+    today = datetime.now(IST).date().isoformat()
+    has_live = D.live_journal_path(today).exists()
+    mode = st.radio("Source", ["Live (today's paper engine)", "History (imported PG snapshots)"],
+                    index=0 if has_live else 1, horizontal=True)
+    if mode.startswith("Live"):
+        if D.live_journal_closed(today):
+            st.info(f"The {today} session is closed (journal compressed at closeout). "
+                    "Switch to History for the imported chain snapshots.")
+            return
+        if not has_live:
+            st.info(f"No paper-engine journal for {today} yet — start the engine (start_trading_day.bat).")
+            return
+        _live_market(today)
+        return
+    st.caption("Imported HISTORY chain (PostgreSQL top-of-book snapshots), ATM±5.")
     days = D.chain_days()
     if not days:
         st.info("No history chain imported.")
@@ -112,6 +128,37 @@ def page_market():
     st.dataframe(wide, width="stretch", hide_index=True)
     st.caption(f"tier: {meta['tier']} · {meta['snapshots_in_day']} snapshots that day")
     _vix_section(day)
+
+
+@st.fragment(run_every=5)
+def _live_market(day: str):
+    """Live view from the engine's journal (read-only, incremental); refreshes every 5 s."""
+    j = D.live_journal(day)
+    wide, meta = D.live_chain(j)
+    age = meta["last_event_age_s"]
+    st.caption(f"Run {D.paper_run_id()} · journal {meta['records']:,} records · started {str(meta['started'])[11:19]}"
+               f" IST · {'session ENDED' if meta['ended'] else 'running'} · refreshes every 5 s")
+    m = st.columns(5)
+    m[0].metric("Spot", f"{meta['spot']:,.0f}" if meta["spot"] else "–")
+    m[1].metric("ATM", f"{meta['atm']:,.0f}" if meta["atm"] else "–")
+    m[2].metric("Expiry", meta["expiry"] or "–")
+    m[3].metric("Last event", f"{age:.0f}s ago" if age is not None else "–")
+    m[4].metric("Contracts", meta["quotes"])
+    if age is not None and age > 30 and not meta["ended"]:
+        st.error(f"No engine event for {age:.0f} s — check the engine window / feed.")
+    if wide.empty:
+        st.info("No option quotes in the journal yet.")
+    else:
+        st.dataframe(wide, width="stretch", hide_index=True)
+    c = st.columns(2)
+    for col, stream, title in ((c[0], "index", "NIFTY 50 (1-min close)"), (c[1], "vix", "India VIX (1-min close)")):
+        b = D.live_bars(j, stream)
+        col.caption(f"{title} · {len(b)} bars" + (f" · last {b['close'].iloc[-1]:,.2f} at {b['time'].iloc[-1]}"
+                                                   if len(b) else ""))
+        if len(b):
+            col.line_chart(b.set_index("time")["close"], height=220)
+    st.caption("Top of book from the engine's own quote stream (what the paper broker fills against). IV, delta "
+               "and OI are not in the journal; see the History view for those.")
 
 
 def _vix_section(day: str):
@@ -406,13 +453,146 @@ def page_config():
     st.dataframe(pd.DataFrame(D.notifications_tail()), width="stretch", hide_index=True)
 
 
-PAGES = {"Home / health": page_home, "Market monitor": page_market, "Signals": page_signals,
+def page_live():
+    st.header("Live session")
+    today = datetime.now(IST).date().isoformat()
+    if D.live_journal_closed(today):
+        _closed_session(today)
+        return
+    if not D.live_journal_path(today).exists():
+        st.info(f"No paper-engine journal for {today} — the engine has not started today (start_trading_day.bat).")
+        return
+    _live_session(today)
+
+
+def _closed_session(day: str):
+    engs = _engines()
+    if "main" not in engs:
+        st.warning(f"{day} was closed out, but the main database was not found.")
+        return
+    d = D.closed_day(engs["main"], day)
+    ps, tr, sig = d["session"], d["trades"], d["signals"]
+    if ps is None:
+        st.warning(f"The {day} journal is closed (compressed), but the database has no paper-session row for run "
+                   f"{d['run_id']} — closeout may not have finished. Check the engine console log in data/logs.")
+        return
+    rec = json.loads(ps.get("reconciliation") or "{}")
+    inc = json.loads(ps.get("incidents") or "[]")
+    st.success(f"Session {day} CLOSED ({ps['status']}). Results below are what closeout saved to the database; "
+               "the Signals, Paper trades and Performance pages have the full history.")
+    net = float(tr["net_pnl"].sum()) if len(tr) else 0.0
+    wins = int((tr["net_pnl"] > 0).sum()) if len(tr) else 0
+    m = st.columns(6)
+    m[0].metric("Engine", "CLOSED")
+    m[1].metric("Signals", len(sig))
+    m[2].metric("Trades (won / lost)", f"{len(tr)} ({wins} / {len(tr) - wins})")
+    m[3].metric("Net P&L ₹", f"{net:,.0f}")
+    m[4].metric("R total", f"{tr['r_multiple'].sum():+.2f}" if len(tr) else "–")
+    m[5].metric("Reconciled", "yes" if rec.get("ok") else "NO")
+    st.caption(f"run {d['run_id']} · journal {int(ps['journal_events']):,} events · restarts {ps['restarts']} · "
+               f"unresolved incidents {sum(not i.get('resolved') for i in inc)}")
+    if rec and not rec.get("ok"):
+        st.error("Closeout reconciliation FAILED: " + json.dumps(rec))
+    cols = ["trade_id", "strategy_id", "contract", "qty", "entry_ts", "entry_px", "exit_ts", "exit_px", "exit_reason",
+            "gross_pnl", "charges", "net_pnl", "r_multiple"]
+    st.subheader(f"Trades ({len(tr)})")
+    if len(tr):
+        st.dataframe(tr[[c for c in cols if c in tr]], width="stretch", hide_index=True)
+    st.subheader(f"Signals ({len(sig)})")
+    if len(sig):
+        st.dataframe(sig, width="stretch", hide_index=True)
+    if inc:
+        st.subheader("Incidents")
+        st.dataframe(pd.DataFrame(inc), width="stretch", hide_index=True)
+
+
+@st.fragment(run_every=5)
+def _live_session(day: str):
+    sh = D.live_shadow(day)
+    s = sh.state()
+    st.caption(f"Rebuilt from the engine's journal by a muted read-only replay (same mechanism as crash recovery); "
+               f"refreshes every 5 s. Signals, trades and P&L reach the database only at the 15:35 closeout.")
+    if s.get("error"):
+        st.error(s["error"])
+        return
+    if not s.get("built"):
+        st.info("Journal has no start record yet.")
+        return
+    auto = (s.get("kill") or {}).get("auto")
+    if s["kill"].get("manual"):
+        st.error("Manual kill switch ON — entries blocked (Config & kill switch page).")
+    if auto and not auto.get("acked_by"):
+        st.error(f"Automatic kill switch TRIPPED: {auto['reason']} — {auto.get('detail')} (at {auto.get('at', '')[11:19]}). "
+                 "New entries are blocked until an operator acknowledges it: "
+                 r"`.venv\Scripts\python scripts\kill_switch.py ack --actor NAME --reason '...'`")
+    if s["mismatches"]:
+        st.error(f"Shadow replay does NOT match {len(s['mismatches'])} engine checkpoint(s) — the view may be wrong.")
+    age = s["last_event_age_s"]
+    if not s["ended"] and age is not None and age > 30:
+        st.error(f"No engine event for {age:.0f} s — check the engine window.")
+    m = st.columns(6)
+    m[0].metric("Engine", "ENDED" if s["ended"] else "RUNNING")
+    m[1].metric("Last event", f"{age:.0f}s ago" if age is not None else "–")
+    m[2].metric("Strategies", ", ".join(s["strategies"]))
+    m[3].metric("Signals", s["signals"])
+    m[4].metric("Open / closed", f"{len(s['open_trades'])} / {s['closed_trades']}")
+    m[5].metric("P&L ₹ (real. + unreal.)", f"{s['realized_inr'] + s['unrealized_inr']:,.0f}")
+    st.caption(f"journal {s['records']:,} records · {s['checkpoints_ok']} engine checkpoints reproduced · "
+               f"warm-up {s['warmup_bars']} bars · risk session {'open' if s['risk_session_open'] else 'waiting for first index bar'}"
+               f" · entries {s['entries']} · consecutive losses {s['consecutive_losses']} · realized R {s['realized_r']:+.2f}"
+               + (" · DAILY LOSS LIMIT HIT" if s["daily_loss_hit"] else "") + (f" · loss latch {s['loss_latch']}" if s["loss_latch"] else ""))
+    lb = s.get("last_bars") or {}
+    if lb:
+        st.caption("Last 1-min bars: " + " · ".join(
+            f"{k} {v['close']:,.2f} @ {datetime.fromtimestamp(v['ts'], IST):%H:%M}" for k, v in sorted(lb.items()) if v.get("ts")))
+    pos = sh.positions()
+    st.subheader(f"Open positions ({len(pos)})")
+    if pos:
+        st.dataframe(pd.DataFrame(pos), width="stretch", hide_index=True)
+    tr = sh.trades()
+    st.subheader(f"Closed trades today ({len(tr)})")
+    if tr:
+        st.dataframe(pd.DataFrame(tr), width="stretch", hide_index=True)
+    sig = sh.signals()
+    st.subheader(f"Signals today ({len(sig)})")
+    if sig:
+        df = pd.DataFrame(sig)
+        keep = [c for c in ("ts", "strategy", "direction", "outcome", "reason", "cycle_key", "contract", "trade_id")
+                if c in df]
+        st.dataframe(df[keep] if keep else df, width="stretch", hide_index=True)
+    else:
+        st.caption("No candidate setup yet. The strategy inputs below show what the rules currently see.")
+    ind = sh.indicators()
+    if ind:
+        st.subheader("What the strategies see (latest indicator values)")
+        rows = []
+        for key, v in ind.items():
+            vals = {k: (round(x, 2) if isinstance(x, float) else x) for k, x in v.items()
+                    if k not in ("ts", "binding", "valid", "state")}
+            rows.append({"indicator": key, "bar": datetime.fromtimestamp(v["ts"], IST).strftime("%H:%M") if v.get("ts") else "",
+                         "state": v.get("state"), "valid": v.get("valid"), "values": json.dumps(vals)})
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    if s["incidents"]:
+        st.subheader("Incidents")
+        st.dataframe(pd.DataFrame(s["incidents"]), width="stretch", hide_index=True)
+    ev = sh.risk_events(30)
+    if ev:
+        st.subheader("Risk events (latest 30)")
+        st.dataframe(pd.DataFrame(ev), width="stretch", hide_index=True)
+
+
+PAGES = {"Live session": page_live, "Home / health": page_home, "Market monitor": page_market, "Signals": page_signals,
          "Paper trades": page_trades, "Performance": page_performance, "Backtests & research": page_research,
          "Config & kill switch": page_config}
 
 st.sidebar.title("NiftyTradingAI")
 st.sidebar.caption("PAPER TRADING ONLY · localhost")
 choice = st.sidebar.radio("Page", list(PAGES))
-_ks = actions.kill_status()
-st.sidebar.markdown(f"**State:** {'🛑 SAFE (kill switch on)' if _ks['manual'] else '🟢 ACTIVE'}")
+try:
+    _label, _detail = D.engine_state_label(datetime.now(IST).date().isoformat())
+except Exception as _e:  # noqa: BLE001
+    _label, _detail = "⚠️ UNKNOWN", repr(_e)[:200]
+st.sidebar.markdown(f"**State:** {_label}")
+if _detail:
+    st.sidebar.caption(_detail)
 PAGES[choice]()

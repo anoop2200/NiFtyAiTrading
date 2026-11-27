@@ -11,6 +11,8 @@ from loguru import logger
 
 from app.data.dhan_rest import DhanAuthError, DhanRest
 
+RATE_LIMIT_BACKOFF_S = (15.0, 120.0)   # pause after HTTP 429: 15 s, doubling to 2 min; reset on the next 200
+
 
 def _f(x: Any) -> float | None:
     try:
@@ -62,6 +64,7 @@ class ChainPoller:
         self.snapshots = 0
         self.errors = 0
         self.last_ok_ns = 0
+        self.backoff_s = 0.0
         self._stop = asyncio.Event()
 
     def stop(self) -> None:
@@ -102,6 +105,17 @@ class ChainPoller:
                     self.on_event("chain_http_error", {"expiry": exp, "status": res.status,
                                                        "body": res.text[:300]})
                     logger.warning(f"option chain {exp} HTTP {res.status}")
+                    if res.status == 429:
+                        # Dhan: "Further requests may result in the user being blocked" - back off, don't hammer
+                        self.backoff_s = min(max(self.backoff_s * 2, RATE_LIMIT_BACKOFF_S[0]), RATE_LIMIT_BACKOFF_S[1])
+                        self.on_event("chain_rate_limited", {"expiry": exp, "pause_s": self.backoff_s})
+                        try:
+                            await asyncio.wait_for(self._stop.wait(), timeout=self.backoff_s)
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
+                if res.status == 200:
+                    self.backoff_s = 0.0
             # with a single expiry the per-expiry rate gate paces the loop; nothing else to wait for
             await asyncio.sleep(0)
 

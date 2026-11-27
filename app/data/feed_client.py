@@ -112,15 +112,12 @@ class FeedClient:
 
     async def _receive(self, ws) -> None:
         stop_task = asyncio.create_task(self._stop.wait())
+        recv_task: asyncio.Task | None = None
         try:
             while True:
                 recv_task = asyncio.create_task(ws.recv())
                 done, _ = await asyncio.wait({recv_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
                 if stop_task in done:
-                    recv_task.cancel()
-                    # the socket may already have failed (e.g. 1011 on disconnect): retrieve it so asyncio does not
-                    # print "Task exception was never retrieved" at shutdown
-                    recv_task.add_done_callback(lambda t: t.cancelled() or t.exception())
                     try:
                         await ws.send(json.dumps({"RequestCode": 12}))
                     except Exception:
@@ -147,3 +144,10 @@ class FeedClient:
                 self.on_rows(rows)
         finally:
             stop_task.cancel()
+            # the recorder stops the feed by cancelling this task (recorder.py: feed.stop() then t.cancel()), which
+            # lands in asyncio.wait above and would orphan the pending recv: when the socket then closes (1011 at the
+            # 15:35 close, 2026-11-27) its exception was never retrieved. Cancel it and retrieve the outcome.
+            if recv_task is not None and not recv_task.done():
+                recv_task.cancel()
+            if recv_task is not None:
+                recv_task.add_done_callback(lambda t: t.cancelled() or t.exception())

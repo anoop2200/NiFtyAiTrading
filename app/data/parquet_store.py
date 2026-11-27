@@ -83,6 +83,18 @@ class PartitionedWriter:
         self.flush()
 
 
+def stream_runs(root: Path, day: str, stream: str) -> dict[str, list[Path]]:
+    """Part files grouped by the writing process (file name part-HHMMSS-<pid>-NNNNN), in start order.
+
+    Each recorder process numbers its packets from 0, so a day with a restart/recovery has one seq range per run."""
+    d = Path(root) / f"date={day}" / f"stream={stream}"
+    runs: dict[str, list[Path]] = {}
+    for f in sorted(d.glob("*.parquet")):
+        parts = f.stem.split("-")
+        runs.setdefault(parts[2] if len(parts) >= 4 else "?", []).append(f)
+    return dict(sorted(runs.items(), key=lambda kv: kv[1][0].name))
+
+
 def read_stream(root: Path, day: str, stream: str) -> pa.Table:
     d = Path(root) / f"date={day}" / f"stream={stream}"
     files = sorted(d.glob("*.parquet"))

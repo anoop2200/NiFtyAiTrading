@@ -63,7 +63,11 @@ engine warms its indicators on (fetched if missing). Exit 0 = OK, 1 = warnings, 
 2. `powershell -ExecutionPolicy Bypass -File scripts\start_market_day.ps1` — pre-flight again (stops on a FAIL), the
    dashboard at http://127.0.0.1:8501 (minimised window), then the engine in this window until 15:35 IST, with a
    console copy in `data\logs\engine_console_*.log`. At the end it closes out, reconciles and sends the daily report.
-3. Watch the dashboard (Market monitor, Paper trading). Alerts go to Telegram.
+3. Watch the dashboard. **Live session** shows the engine's in-memory state (signals, open positions, trades,
+   P&L, automatic kill latch, incidents, the indicator values the strategies see), rebuilt every 5 s by a muted
+   read-only replay of the journal (`app/engine/shadow.py`) that is checked against every engine checkpoint;
+   **Market monitor → Live** shows the chain from the engine's quote stream. The database tables (Signals, Paper
+   trades, Performance) fill only at the 15:35 closeout. Alerts go to Telegram.
 
 **During the day:**
 - Stop new entries: `.venv\Scripts\python scripts\kill_switch.py on --actor NAME --reason "..."`
@@ -71,7 +75,9 @@ engine warms its indicators on (fetched if missing). Exit 0 = OK, 1 = warnings, 
   `kill_switch.py off --actor NAME --reason "..." --confirm RESUME`. An automatic trip (feed outage, risk error)
   needs `kill_switch.py ack` before resuming.
 - Engine crashed or window closed: `start_market_day.ps1 -Recover -Actor NAME` — the journal is replayed and
-  verified before trading continues. A plain restart is refused while an unfinished journal exists.
+  verified before trading continues. A plain restart is refused while an unfinished journal exists. The feed
+  watchdog (30 s without an option quote → automatic kill) measures from the engine's first in-market tick and
+  re-anchors at every recovery, so a late start or restart downtime is not counted as an outage (2026-11-27 fix).
 - A late fresh start (after 09:17 IST) is allowed: indicators warm up on the prior sessions, but the opening range
   cannot be observed, so ORB is left out of that session (logged) and only pullback runs. Start before 09:15.
 

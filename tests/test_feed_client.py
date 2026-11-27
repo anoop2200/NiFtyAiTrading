@@ -75,3 +75,38 @@ def test_subscription_batching_limit():
     msgs = [json.loads(m) for m in client._messages(subs)]
     assert [m["InstrumentCount"] for m in msgs] == [100, 100, 50]
     assert all(isinstance(x["SecurityId"], str) for m in msgs for x in m["InstrumentList"])
+
+
+
+@pytest.mark.asyncio
+async def test_cancelled_receive_leaves_no_unretrieved_exception():
+    """15:35 on 2026-11-27: the recorder cancels the feed task; the orphaned recv later failed with 1011 and asyncio
+    printed 'Task exception was never retrieved'."""
+    import gc
+    loop = asyncio.get_running_loop()
+    seen = []
+    old = loop.get_exception_handler()
+    loop.set_exception_handler(lambda lp, ctx: seen.append(ctx.get("message")))
+    closed = asyncio.Event()
+
+    class _WS:
+        async def recv(self):
+            await closed.wait()                     # socket closes only after the task was cancelled
+            raise websockets.exceptions.ConnectionClosedError(None, None)
+
+    client = FeedClient("ws://unused", lambda rows: None)
+    try:
+        t = asyncio.create_task(client._receive(_WS()))
+        await asyncio.sleep(0.01)
+        client.stop()
+        t.cancel()                                  # exactly what Recorder.run's finally does
+        await asyncio.gather(t, return_exceptions=True)
+        del t                                       # its CancelledError traceback would keep the recv task alive
+        closed.set()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(old)
+    assert not [m for m in seen if m and "never retrieved" in m], seen

@@ -317,6 +317,39 @@ def test_feed_outage_watchdog(tmp_path):
     assert any(i["kind"] == "FEED_OUTAGE" and not i["resolved"] for i in s.incidents)
 
 
+def _q(ns):
+    return QUOTES[-1].__class__(ns, QUOTES[0].key, QUOTES[0].bids, QUOTES[0].asks, 1.0, "observed_feed", False)
+
+
+def test_late_start_is_not_a_feed_outage(tmp_path):
+    """2026-11-27: an engine started at 09:21 tripped FEED_OUTAGE (419 s 'since the open') on its first tick."""
+    s = new_session(tmp_path)
+    s.tick(_ns(9, 21, 58))                       # first tick of a late-started engine, no quote yet
+    assert s.kill.auto is None
+    s.tick(_ns(9, 22, 20))                       # quotes may take a few seconds after the late start
+    assert s.kill.auto is None
+    s.tick(_ns(9, 22, 40))                       # 42 s after the start without any quote: a real outage
+    assert s.kill.blocking_reason() == "KILL_SWITCH_AUTO:FEED_OUTAGE"
+
+
+def test_restart_downtime_is_not_a_feed_outage_and_replays_identically(tmp_path):
+    s = new_session(tmp_path)
+    s.tick(_ns(9, 15, 0))
+    s.quote(_q(_ns(9, 30, 0)))
+    s.tick(_ns(9, 30, 5))
+    s.journal.close()                            # engine killed at 09:30:05
+    s2 = recover(tmp_path)
+    assert s2.kill.auto is None
+    s2.tick(_ns(9, 31, 10))                      # back 65 s later: downtime is not an outage
+    assert s2.kill.auto is None and not s2.incidents[:-1]
+    s2.quote(_q(_ns(9, 31, 12)))
+    s2.tick(_ns(9, 31, 50))                      # 38 s without a quote after the restart: real outage
+    assert s2.kill.blocking_reason() == "KILL_SWITCH_AUTO:FEED_OUTAGE"
+    s2.journal.close()
+    s3 = recover(tmp_path)                       # a second replay reproduces exactly the same kill state
+    assert s3.recovery["checkpoints_failed"] == [] and s3.kill.auto["reason"] == "FEED_OUTAGE"
+
+
 # ---------------------------------------------------------------------------------------------- closeout
 def test_closeout_reconciles_and_persists(tmp_path, engine):
     s = new_session(tmp_path)
@@ -538,3 +571,52 @@ def test_real_history_paper_engine_equals_backtest(tmp_path):
     s.finish()
     strip = lambda ts: [{k: v for k, v in t.items() if k != "session"} for t in ts]  # noqa: E731
     assert strip(want) == s.broker.trades
+
+
+def test_shadow_replay_matches_engine_incrementally(tmp_path):
+    """Dashboard shadow: a muted journal replay reproduces the engine's signals, trades and checkpoints, reading
+    the live journal in pieces, and never writes to it."""
+    from app.engine.shadow import ShadowSession
+    s = new_session(tmp_path, sp=spec(checkpoint_every=50))
+    half = len(EVENTS) // 2
+    push(s, EVENTS[:half])
+    s.journal.flush()
+    jp = tmp_path / "j.jsonl"
+    size = jp.stat().st_size
+    sh = ShadowSession(jp, strategy_factory=lambda: [EveryN()]).refresh()
+    assert jp.stat().st_size == size                                   # read-only
+    push(s, EVENTS[half:])
+    s.journal.flush()
+    sh.refresh()
+    st = sh.state()
+    assert st["built"] and not st["mismatches"] and st["checkpoints_ok"] > 0 and not st["error"]
+    assert len(sh.signals()) == len(s.pipe.signals) and len(sh.trades()) == len(s.broker.trades)
+    assert sh.session.broker.audit.head == s.broker.audit.head
+    assert st["realized_inr"] == round(sum(float(t.get("net_pnl") or 0) for t in s.broker.trades), 2)
+
+
+def test_shadow_concurrent_refresh_does_not_double_feed(tmp_path):
+    """2026-11-27: two dashboard tabs refreshed one shared shadow at once and fed the same bytes twice."""
+    import threading
+    from app.engine.shadow import ShadowSession
+    s = new_session(tmp_path, sp=spec(checkpoint_every=50))
+    sh = ShadowSession(tmp_path / "j.jsonl", strategy_factory=lambda: [EveryN()])
+    stop = threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            sh.refresh()
+
+    threads = [threading.Thread(target=reader) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for i in range(0, len(EVENTS), 25):
+        push(s, EVENTS[i:i + 25])
+        s.journal.flush()
+    stop.set()
+    for t in threads:
+        t.join()
+    sh.refresh()
+    st = sh.state()
+    assert st["error"] is None and not st["mismatches"] and st["checkpoints_ok"] > 0
+    assert sh.session.broker.audit.head == s.broker.audit.head and sh.records == s.journal.records

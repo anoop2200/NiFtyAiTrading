@@ -198,6 +198,18 @@ def main() -> int:
                     f"local clock {off:+.2f} s vs NTP" + ("" if abs(off) < 1 else " - resync Windows time"))
         except OSError as e:
             rep.add("clock", WARN, f"NTP unreachable ({e}); check Windows time sync manually")
+        if sys.platform == "win32":
+            # without the Windows Time service the clock is never corrected (2026-11-27: drifted ~70 ms/hour)
+            import subprocess
+            try:
+                out = subprocess.run(["sc", "query", "w32time"], capture_output=True, text=True, timeout=10).stdout
+                running = "RUNNING" in out
+                rep.add("time service", OK if running else WARN,
+                        "Windows Time running" if running else
+                        "Windows Time service is not running - the clock drifts all day. As administrator: "
+                        "sc config w32time start= auto ; net start w32time ; w32tm /resync")
+            except (OSError, subprocess.SubprocessError) as e:
+                rep.add("time service", WARN, f"cannot query w32time ({e})")
         asyncio.run(dhan_checks(cfg, rep, day, a.fix))
 
     out = cfg.path("reports") / "preflight"

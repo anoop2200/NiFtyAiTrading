@@ -19,6 +19,9 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $py = Join-Path $root ".venv\Scripts\python.exe"
 $env:PYTHONIOENCODING = "utf-8"
+# the engine prints UTF-8 (rupee sign etc.); without this PowerShell decodes it with the OEM code page (mojibake)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 $logDir = Join-Path $root "data\logs"
 New-Item -ItemType Directory -Force $logDir | Out-Null
 
