@@ -14,10 +14,12 @@ checkpoint_every: 2000            # journal checkpoint (audit head) every N appl
 operational_run_sessions: 30      # §17 phase 9 acceptance: consecutive sessions without unresolved critical incidents
 
 # Strategy book (NIFTY Options Strategy Book - Implementation Specification, 28 Nov 2026): ten independent
-# index-signal / option-buying strategies, forward-tested as their OWN paper run inside the same engine and feed.
+# index-signal / option-buying strategies (+ the parallel N1-N8), forward-tested as their OWN paper run inside the same engine and feed.
 # Guard: kill switch only (user decision 28 Nov 2026). Names: app/book/strategies.py. Remove a code to pause it.
 book:
   enabled: true
   run_id: book_v1
-  codes: [U1, PB, Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8]
+  # base book U1, PB, Q1-Q8 + parallel set N1-N8 (N1-N8 Implementation Specification, 28 Nov 2026: paper only,
+  # out-of-sample PF 1.16; the spec suggests watching N2 and N7, which lost money Jul 2025-Oct 2026)
+  codes: [U1, PB, Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8, N1, N2, N3, N4, N5, N6, N7, N8]
   warmup_sessions: 35             # spec §2.1: >= 35 trading days of 1-minute index history

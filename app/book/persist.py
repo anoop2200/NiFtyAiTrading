@@ -55,7 +55,7 @@ def capital(trades: list[dict]) -> dict:
 
 
 def persist_day(db: Engine, run_id: str, session_date: str, trades: list[dict], signals: list[dict],
-                mode: str = "paper", fee_version: str = "book-cost-1") -> None:
+                mode: str = "paper", fee_version: str | None = None) -> None:
     cap = capital(trades)
     with Session(db) as s:
         for model in (PaperTrades, TradingSignals, CapitalUsage, BookTrades):
@@ -68,7 +68,8 @@ def persist_day(db: Engine, run_id: str, session_date: str, trades: list[dict], 
                               entry_ts=t["entry_ts"], exit_ts=t["exit_ts"], entry_px=t["entry_px"],
                               exit_px=t["exit_px"], exit_reason=t["exit_reason"], gross_pnl=t["gross_pnl"],
                               charges=t["charges"], net_pnl=t["net_pnl"], risk_inr=t["risk_inr"],
-                              r_multiple=t["r_multiple"], low_fidelity=0, fee_version=fee_version,
+                              r_multiple=t["r_multiple"], low_fidelity=0,
+                              fee_version=fee_version or t.get("fee_version", "book-cost-1"),
                               fill_model=FILL_MODEL))
             s.add(BookTrades(run_id=run_id, session_date=session_date, trade_id=t["trade_id"], code=t["code"],
                              strategy_id=t["strategy_id"], name=t["name"], side=t["side"], contract=t["contract"],

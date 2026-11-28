@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.book import engine as BE
 from app.book.engine import NS, BookEngine
-from app.book.exits import CostModel, Position
+from app.book.exits import CostModel, Position, n_cost_model
 from app.book.strategies import STRATEGIES, chart_signals
 from app.clock import IST
 
@@ -103,10 +103,12 @@ def test_signals_are_causal_so_fast_replay_equals_live(tf):
     codes = [c for c, s in STRATEGIES.items() if s.tf == tf]
     full_df, full = chart_signals(m1, tf, codes)
     from app.book.indicators import resample
-    from app.book.strategies import Q_RULES, _q_condition
-    names = sorted({n for c in codes if c in Q_RULES for n in [Q_RULES[c][0], *Q_RULES[c][1]]})
+    from app.book.strategies import N_RULES, Q_RULES, _q_condition, n_condition
+    names = sorted({(n, "q") for c in codes if c in Q_RULES for n in [Q_RULES[c][0], *Q_RULES[c][1]]}
+                   | {(n, "n") for c in codes if c in N_RULES for n in [N_RULES[c][0], *N_RULES[c][1]]})
+    fn = {"q": _q_condition, "n": n_condition}
     fcache: dict = {}
-    fcond = {n: _q_condition(n, m1, resample(m1, tf), tf, fcache) for n in names}
+    fcond = {n: fn[k](n[0], m1, resample(m1, tf), tf, fcache) for n in names for k in [n[1]]}
     varied = 0
     for cut in range(len(full_df) - 120, len(full_df), 7):            # last day, every 7th candle
         start = full_df.index[cut]
@@ -118,7 +120,7 @@ def test_signals_are_causal_so_fast_replay_equals_live(tf):
                 assert np.array_equal(np.asarray(part[c][k]), np.asarray(full[c][k][:cut + 1])), (c, k, start)
         pcache: dict = {}
         for n in names:                                               # every single condition, both sides
-            p = _q_condition(n, pm1, resample(pm1, tf), tf, pcache)
+            p = fn[n[1]](n[0], pm1, resample(pm1, tf), tf, pcache)
             for side in (0, 1):
                 assert np.array_equal(p[side], fcond[n][side][:cut + 1]), (n, side, start)
     for n in names:                                                   # the comparison is not vacuous
@@ -225,3 +227,90 @@ def test_kill_switch_blocks_book_entries(tmp_path, book_session):
     sig = [x for x in s.book.signals if x["code"] == "Q8"]
     assert sig and sig[0]["outcome"] == "NO_TRADE" and sig[0]["reason"].startswith("KILL_SWITCH")
     assert s.book.state["Q8"]["done"]                                     # Q: first qualifying candle ends the day
+
+
+# ---------------------------------------------------------------------------------------------- N1-N8
+def test_n_strategies_are_configured_like_the_specification():
+    from app.book.strategies import N_RULES
+    spec = {"N1": (3, "CE", 150, "X2"), "N2": (5, "PE", 250, "X1"), "N3": (5, "CE", 150, "E5"),
+            "N4": (3, "PE", 150, "X1"), "N5": (5, "PE", 200, "E5"), "N6": (5, "CE", 200, "X1"),
+            "N7": (5, "CE", 250, "E5"), "N8": (3, "CE", 150, "E5")}
+    for code, (tf, side, target, ex) in spec.items():
+        s = STRATEGIES[code]
+        assert (s.tf, s.side, s.target, s.exit, s.rule, s.scan, s.flip, s.fees, s.family) == \
+            (tf, side, target, ex, "first", (-10, 6), (10, 3.0), "n", "parallel")
+        assert s.band == (round(0.6 * target, 2), round(1.4 * target, 2))
+        assert len(N_RULES[code][1]) == 5                       # 2 trend + 2 momentum + 1 context
+    assert len({s.sid for s in STRATEGIES.values()}) == len(STRATEGIES) == 18
+    assert len({s.name for s in STRATEGIES.values()}) == 18
+
+
+def test_n_cost_schedule_reproduces_reference_pnl():
+    # N2 2026-06-29: 239.60 -> stop 203.66, volumes liquid -> spec P&L -2,421.10 (STT 0.15% from 2026-04-01)
+    c = n_cost_model("2026-06-29").round_trip(239.60, 203.66, 65, 1000, 1000)
+    assert round((203.66 - 239.60) * 65 - c["total"], 2) == pytest.approx(-2421.10, abs=0.05)
+    assert n_cost_model("2026-06-29").stt_sell_rate == 0.0015 and n_cost_model("2026-03-31").stt_sell_rate == 0.001
+    assert n_cost_model("2025-07-24").exchange_rate == 0.00035
+    assert CostModel().stt_sell_rate == 0.001                    # the base book keeps its own specification
+    e = BookEngine("2026-06-29", 65, ["N2", "Q1"])
+    assert e.cost_for("N2").version == "n-cost-1" and e.cost_for("Q1").version == "book-cost-1"
+
+
+def test_break_even_stop_is_labelled():
+    p = Position(key="k", side="CE", profile="E5", entry_ts=0, entry=100.0, qty=65)
+    p.stop, p.peak = 85.0, 100.0
+    bar = lambda ts, o, h, lo: {"ts": ts, "open": o, "high": h, "low": lo, "close": o, "volume": 1000}  # noqa: E731
+    p.on_bar(bar(0, 100, 121, 99), 600)                         # +21% -> break-even (stop = entry), trail not armed
+    assert p.stop == 100.0 and not p.armed
+    p.on_bar(bar(60, 110, 112, 99), 601)
+    assert p.exit_reason == "BE_SL" and p.exit_px == 100.0
+
+
+# ---------------------------------------------------------------------------------------------- combined report
+def test_combined_daily_report_lists_every_strategy(tmp_path, book_session, engine):
+    P9, sp = book_session
+    s = P9.new_session(tmp_path, sp=sp, book_warmup={"ts": [], "open": [], "high": [], "low": [], "close": []})
+    P9.push(s, P9.EVENTS)
+    from app.engine.closeout import closeout
+    from app.reports.combined import build_combined, format_combined
+    closeout(engine, s)
+    d = build_combined(engine, sp.session, sp.run_id, list(sp.strategies), "book_t", ["Q8", "Q1"],
+                       notes=["kill switch ON at close: test"])
+    parts = format_combined(d)
+    txt = "\n".join(parts)
+    t = s.book.trades[0]
+    assert len(parts) == 1 and len(txt) < 4000
+    assert txt.startswith("📊 NiftyTradingAI — Daily P&L Report")
+    assert "Q8 Call · Afternoon Scalp" in txt and "Supertrend flip" in txt and "No signal: Q1" in txt
+    assert d["net"] == pytest.approx(sum(x["net"] for x in d["trades"]))
+    assert any(x["code"] == "Q8" and x["net"] == t["net_pnl"] for x in d["trades"])
+    assert "kill switch ON at close: test" in txt and "Run to date" in txt
+
+
+def test_combined_report_splits_long_days_into_numbered_parts():
+    from app.reports.combined import format_combined
+    tr = [{"group": "base", "code": f"Q{i % 8 + 1}", "name": "x" * 60, "contract": "24000 CE",
+           "entry_ts": "2026-12-01T10:00:00", "exit_ts": "2026-12-01T11:00:00", "entry_px": 100.0, "exit_px": 110.0,
+           "qty": 65, "reason": "ST_FLIP", "gross": 650.0, "charges": 85.0, "net": 565.0, "exec": None}
+          for i in range(60)]
+    d = {"app": "NiftyTradingAI", "session": "2026-12-01", "trades": tr, "notes": [], "to_date": [],
+         "strategies": [{"group": "base", "code": f"Q{i}", "name": "x", "traded": True, "skip": None} for i in range(1, 9)],
+         "net": 1.0, "gross": 1.0, "charges": 1.0, "exec_net": None, "exec_count": 0, "wins": 60, "losses": 0,
+         "peak_capital": 0.0, "peak_capital_at": None, "run_trades": 0}
+    parts = format_combined(d)
+    assert len(parts) > 1 and all(len(p) <= 4096 for p in parts)
+    assert "(part 1/" in parts[0] and f"(part {len(parts)}/{len(parts)})" in parts[-1]
+
+
+def test_daily_report_is_never_held_back_by_the_daily_cap():
+    from app.notify.telegram import INFO, Alert, Notifier, NotifyPolicy
+
+    class T:
+        name, sent = "t", []
+
+        def send(self, text):
+            self.sent.append(text)
+    n = Notifier(T(), NotifyPolicy(daily_cap=1))
+    assert n.send(Alert("book", INFO, "a", key="a")) == "SENT"
+    assert n.send(Alert("book", INFO, "b", key="b")) == "CAPPED"
+    assert n.send(Alert("daily_pnl", INFO, "report", key="r")) == "SENT"

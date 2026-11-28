@@ -89,33 +89,57 @@ engine warms its indicators on (fetched if missing). Exit 0 = OK, 1 = warnings, 
 `smoke_paper_rules_v1`, research DB, alerts to `data\paper\smoke_paper_rules_v1\_runtime\telegram_outbox.jsonl`.
 API check: `scripts\smoke_test.py --ws-seconds 30`.
 
-## Strategy book — ten-strategy forward test (run `book_v1`)
+## Strategy book — 18-strategy forward test (run `book_v1`)
 
-Implements "NIFTY Options Strategy Book — Implementation Specification" (`app/book/`). It runs inside the same
-paper engine and feed as its own run (`book_v1`) next to ORB/pullback (`paper_rules_v1`). Each strategy finds its own
-signal and takes at most one trade a day. The only guard is the kill switch: it blocks new entries, and a running
-trade still exits by its own rules. Turn it on or off and pick strategies in `config/paper.yaml` → `book:`.
+Implements two specifications in `app/book/`:
+- "NIFTY Options Strategy Book — Implementation Specification": the base ten (U1, PB, Q1–Q8).
+- "NIFTY Parallel Strategies N1–N8 — Implementation Specification": the parallel set N1–N8. Its own spec says it
+  is for paper testing only: out-of-sample profit factor 1.16, with N2 and N7 losing money from Jul 2025 to Oct 2026.
+
+The book runs inside the same paper engine and feed as its own run (`book_v1`), next to ORB/pullback
+(`paper_rules_v1`). Each strategy finds its own signal and takes at most one trade a day. The only guard is the kill
+switch: it blocks new entries, and a trade already open still exits by its own rules. Turn the book on or off and
+pick strategies in `config/paper.yaml` → `book:`. Remove a code there to pause that strategy.
 
 | Code | Name | Chart | Exit |
 |---|---|---|---|
 | U1 | Call · Pivot Breakout | 3 min | X1 |
-| PB | Put · Opening-Range Breakdown | 3 min | X1 |
-| Q1 | Call · Momentum Surge | 3 min | E5 |
+| PB | Put · Opening-Range Breakdown | 3 min | E5 |
+| Q1 | Call · Momentum Surge | 3 min | X1 |
 | Q2 | Call · Afternoon Trend Ride | 3 min | E5 |
-| Q3 | Call · Afternoon VWAP Burst | 5 min | X1 |
+| Q3 | Call · Afternoon VWAP Burst | 5 min | X2 |
 | Q4 | Call · VWAP Breakout | 3 min | X1 |
 | Q5 | Put · Morning VWAP Flush | 1 min | X1 |
 | Q6 | Put · Afternoon Slide | 1 min | E5 |
 | Q7 | Put · Trend Breakdown | 5 min | X1 |
-| Q8 | Call · Afternoon Scalp | 1 min | X2 |
+| Q8 | Call · Afternoon Scalp | 1 min | X1 |
+| N1 | Call · SAR Flip Volatility Burst | 3 min | X2 |
+| N2 | Put · SAR Flip Volatility Drop | 5 min | X1 |
+| N3 | Call · Camarilla H4 Breakout | 5 min | E5 |
+| N4 | Put · SAR Flip Trend Slide | 3 min | X1 |
+| N5 | Put · Fisher Trend Drop | 5 min | E5 |
+| N6 | Call · Late Opening-Range Breakout | 5 min | X1 |
+| N7 | Call · Late SAR Flip | 5 min | E5 |
+| N8 | Call · Early SAR Flip | 3 min | E5 |
 
 `scripts\run_book.py strategies` prints the full rules.
 
+Exit styles:
+- **X1**: stop −15%, then a 15% trail once the trade is +15%.
+- **E5**: stop −15%, move to break-even at +20%, then a 25% trail from +40%.
+- **X2**: fixed stop −15%.
+
 - **Signals:**
-  - Signals come from closed NIFTY index candles, over 35 warm-up sessions plus today.
+  - Signals come from closed NIFTY index candles, using 35 warm-up sessions plus today.
   - Entry is at the open of the next 1-minute option bar.
   - The strike is the one whose premium is closest to the strategy's target band.
-  - Exits are on the option premium: stop, break-even or trail, a Supertrend flip on the index chart, or 15:15 square-off.
+  - Exits are on the option premium: stop, break-even or trail, a Supertrend flip on the index chart, or the
+    15:15 square-off.
+  - N1–N8 use their own indicator set (`app/book/nconditions.py`).
+- **Costs follow each spec:**
+  - The base book uses STT 0.1%.
+  - N1–N8 use the N spec's dated schedule, which is STT 0.15% from 2026-04-01.
+  - Each trade records its cost version (`book-cost-1` / `n-cost-1`).
 - **Two P&L figures per trade:**
   - **model**: the specification's bar fills, slippage and costs, so it is comparable with the backtest;
   - **executable**: the live ask at the signal and the live bid at the exit, with the same costs and no slippage.
@@ -127,9 +151,35 @@ trade still exits by its own rules. Turn it on or off and pick strategies in `co
 - **Recovery:** the book is rebuilt from the journal like the rest of the engine. A strategy whose signal fired
   before a late start is marked `ENGINE_STARTED_LATE` for that day.
 - **Validation and replays** use research-tier data: trade prices, ATM ±5 strikes only.
-  - `.venv\Scripts\python scripts\run_book.py validate` checks the specification's reference trades (§7.3).
-  - `run_book.py replay --from 2026-09-01 --to 2026-10-16 [--codes Q1,Q4] [--persist]` writes CSVs to
-    `data\backtests\book`. With `--persist` it also writes run `book_replay` to the research DB, shown in the same tab.
+  - `.venv\Scripts\python scripts\run_book.py validate [--codes N1,N3]` checks every reference trade in both specs.
+  - `run_book.py replay --from 2026-09-01 --to 2026-10-16 [--codes Q1,N3] [--persist]` writes CSVs to
+    `data\backtests\book`. With `--persist` it also writes run `book_replay` to the research DB, shown in the
+    same tab.
+
+### Daily P&L report (Telegram, right after the 15:35 closeout)
+
+The engine sends one message for the whole system: **"📊 NiftyTradingAI — Daily P&L Report"**. It covers the rule
+strategies and all book strategies. The detailed rules and book reports stay in the engine log and on the dashboard.
+
+The message has these sections:
+1. **Day total**:
+   - net (model), gross, charges, wins and losses;
+   - executable net (live bid/ask);
+   - best and worst trade;
+   - peak capital in use.
+2. **By group**: rules, base book and parallel N, each with its net and number of trades.
+3. **By strategy**: each trade with its contract, entry→exit times and prices, exit reason, net and executable net.
+   Then one line per group listing strategies that had a signal but did not trade (and why), and those with no signal.
+4. **Run to date**:
+   - net, month to date, profit factor and max drawdown;
+   - best and worst day;
+   - per strategy: trades, win rate, net, PF, max DD and MTD.
+5. **Notes**: kill switch still on, closeout problems.
+
+A long day is sent in numbered parts. The report is exempt from the daily alert cap, so it is never held back.
+Preview any past day on **Strategy book → Daily report**. Re-send it with:
+`.venv\Scripts\python scripts\send_daily_report.py --combined --db main --date 2026-12-01 --send`
+(without `--send`, it goes to the outbox file only).
 
 ## Historical import from optionchain_db (read-only)
 

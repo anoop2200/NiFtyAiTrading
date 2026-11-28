@@ -229,12 +229,47 @@ async def _live(a) -> int:
     ticker.cancel()
     r = closeout(db, s)
     logger.info(f"recorder {status}; {_summary(day, r)}; adapter errors {adapter.errors}")
-    _report(db, run_id, day, notifier)
+    try:                                               # detailed reports: console / log (the dashboard has them)
+        _report(db, run_id, day, None)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"rules report: {e!r}")
     if s.book is not None:
         write_book_snapshot(s.book, day)
-        _book_report(db, s.book, day, notifier, r.get("book"))
+        try:
+            _book_report(db, s.book, day, None, r.get("book"))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"book report: {e!r}")
+    _combined_report(db, s, day, notifier, r)          # the one daily P&L message to Telegram
     notifier.flush_digest()
     return 0 if r["status"] == "COMPLETED" else 1
+
+
+def _combined_report(db, s, day, notifier, r) -> None:
+    """NiftyTradingAI daily P&L report: every strategy (rules + book) in one Telegram message after closeout."""
+    from app.notify.telegram import INFO, Alert
+    from app.reports.combined import build_combined, format_combined
+    notes = []
+    if r.get("status") != "COMPLETED":
+        notes.append(f"closeout status {r.get('status')}")
+    if (r.get("book") or {}).get("error"):
+        notes.append(f"strategy book closeout error: {r['book']['error']}")
+    try:
+        why = s.kill.blocking_reason()
+        if why:
+            notes.append(f"kill switch ON at close: {why}")
+    except Exception:  # noqa: BLE001 - a note only
+        pass
+    try:
+        d = build_combined(db, day, s.spec.run_id, list(s.spec.strategies),
+                           s.book.run_id if s.book is not None else None,
+                           list(s.book.codes) if s.book is not None else [], notes)
+        parts = format_combined(d)
+    except Exception as e:  # noqa: BLE001 - never lose the closeout over the report; say so instead
+        parts = [f"📊 NiftyTradingAI — Daily P&L Report {day}\nreport failed: {e!r}"[:500]]
+    for i, text in enumerate(parts, 1):
+        print(text)
+        if notifier:
+            notifier.send(Alert("daily_pnl", INFO, text, key=f"daily|combined|{day}|{i}"))
 
 
 def _book_spec(book_cfg: dict, smoke: bool) -> dict:

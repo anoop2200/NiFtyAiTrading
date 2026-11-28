@@ -1,7 +1,8 @@
-"""The ten strategies of the NIFTY options strategy book (Implementation Specification §5, §6).
+"""The strategies of the NIFTY options strategy book: the base ten (Implementation Specification §5, §6) and
+the parallel set N1-N8 (N1-N8 Implementation Specification §3, §5).
 
 Each strategy has a stable machine id (used in the database), a plain-English name for people, and its code in the
-specification (U1, PB, Q1..Q8) for traceability. Signals are computed on CLOSED candles of the NIFTY index chart;
+specification (U1, PB, Q1..Q8, N1..N8) for traceability. Signals are computed on CLOSED candles of the NIFTY index chart;
 only the option is traded. `chart_signals` evaluates every strategy of one timeframe over a frame of 1-minute index
 bars and returns per-candle arrays; the book engine reads the candle that just closed.
 """
@@ -13,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from app.book import indicators as I
+from app.book.nconditions import n_condition
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,8 @@ class StrategyDef:
     exit: str                  # X1 | E5 | X2
     flip: tuple[int, float]    # Supertrend (period, multiplier) on the strategy's chart for the flip exit
     summary: str = ""
+    fees: str = "book"         # cost schedule: "book" (base specification) | "n" (N1-N8 specification, dated STT)
+    family: str = "base"       # "base" (U1, PB, Q1-Q8) | "parallel" (N1-N8)
 
     @property
     def direction(self) -> int:
@@ -66,6 +70,52 @@ STRATEGIES: dict[str, StrategyDef] = {s.code: s for s in [
     _q("Q8", "call_afternoon_scalp", "Call · Afternoon Scalp", 1, "CE", 150, "X1",
        "1-min BB(20,3.5) breakout + HalfTrend up + 5-min Supertrend up + rising AO + 5-min %B>0.8, from 12:00"),
 ]}
+
+
+
+def _n(code, sid, name, tf, side, target, exit_, summary):
+    return StrategyDef(code, sid, name, tf, side, "first", target, (round(0.6 * target, 2), round(1.4 * target, 2)),
+                       (-10, 6), exit_, (10, 3.0), summary, fees="n", family="parallel")
+
+
+# Parallel strategies N1-N8 (N specification §5): paper forward test only (the spec does not recommend live money)
+for _s in [
+    _n("N1", "call_sar_volatility_burst", "Call · SAR Flip Volatility Burst", 3, "CE", 150, "X2",
+       "3-min Parabolic SAR flips up + Ichimoku bullish + 5-min HMA rising + KST and RVI above signal + ATR5/ATR20>1.2"),
+    _n("N2", "put_sar_volatility_drop", "Put · SAR Flip Volatility Drop", 5, "PE", 250, "X1",
+       "5-min Parabolic SAR flips down + Ichimoku bearish + two red 3-min Heikin-Ashi + UO<40 + RVI below signal "
+       "+ ATR5/ATR20>1.2"),
+    _n("N3", "call_camarilla_breakout", "Call · Camarilla H4 Breakout", 5, "CE", 150, "E5",
+       "5-min close crosses above yesterday's Camarilla H4 + EMA 8>21>55 + two green Heikin-Ashi + UO>60 + RVI "
+       "above signal + ATR5/ATR20>1.2"),
+    _n("N4", "put_sar_trend_slide", "Put · SAR Flip Trend Slide", 3, "PE", 150, "X1",
+       "3-min Parabolic SAR flips down + Ichimoku bearish + 5-min HMA falling + UO<40 + squeeze momentum falling "
+       "+ trending market (CHOP<38.2)"),
+    _n("N5", "put_fisher_trend_drop", "Put · Fisher Trend Drop", 5, "PE", 200, "E5",
+       "5-min Parabolic SAR flips down + KAMA falling + two red 3-min Heikin-Ashi + Fisher falling below 0 + RVI "
+       "below signal + trending market (CHOP<38.2)"),
+    _n("N6", "call_late_or_breakout", "Call · Late Opening-Range Breakout", 5, "CE", 200, "X1",
+       "5-min close crosses above the 09:15-09:30 high + Ichimoku bullish + EMA 8>21>55 + TRIX rising + UO>60, "
+       "from 13:30"),
+    _n("N7", "call_late_sar_flip", "Call · Late SAR Flip", 5, "CE", 250, "E5",
+       "5-min Parabolic SAR flips up + HMA rising + EMA 8>21>55 + Fisher rising above 0 + UO>60, from 13:30"),
+    _n("N8", "call_early_sar_flip", "Call · Early SAR Flip", 3, "CE", 150, "E5",
+       "3-min Parabolic SAR flips up + 50-bar regression slope up + two green Heikin-Ashi + RVI above signal + "
+       "squeeze momentum rising, before 10:15"),
+]:
+    STRATEGIES[_s.code] = _s
+
+# N conditions (N specification §5): trigger + trend 1, trend 2, momentum 1, momentum 2, context
+N_RULES = {
+    "N1": ("psarf", ["ichi", "hma5m", "kst", "rvi", "atrx"]),
+    "N2": ("psarf", ["ichi", "ha3m", "uo", "rvi", "atrx"]),
+    "N3": ("cam4", ["emastack", "ha", "uo", "rvi", "atrx"]),
+    "N4": ("psarf", ["ichi", "hma5m", "uo", "sqzmom", "chop38"]),
+    "N5": ("psarf", ["kama", "ha3m", "fisher", "rvi", "chop38"]),
+    "N6": ("orb15", ["ichi", "emastack", "trix", "uo", "late"]),
+    "N7": ("psarf", ["hma", "emastack", "fisher", "uo", "late"]),
+    "N8": ("psarf", ["lrs", "ha", "rvi", "sqzmom", "h1"]),
+}
 
 # Q conditions (spec §6.2): trigger + list of condition names
 Q_RULES = {
@@ -211,6 +261,13 @@ def chart_signals(m1: pd.DataFrame, tf: int, codes: list[str]) -> tuple[pd.DataF
             fresh = k & ~np.r_[False, k[:-1]]
             out[code] = {"signal": fresh & (mins <= SIGNAL_LAST_MIN), "blocked": None, "st": st(*sd.flip),
                          "detail": {"gap_pct": gap, "orl": orl, "rsi": r.to_numpy(), "wr": wr.to_numpy()}}
+        elif code in N_RULES:
+            trig, conds = N_RULES[code]
+            si = 0 if sd.side == "CE" else 1
+            ok = n_condition(trig, m1, df, tf, cache)[si] & window
+            for cnd in conds:
+                ok = ok & n_condition(cnd, m1, df, tf, cache)[si]
+            out[code] = {"signal": ok, "blocked": None, "st": st(*sd.flip), "detail": {}}
         else:
             trig, conds = Q_RULES[code]
             si = 0 if sd.side == "CE" else 1

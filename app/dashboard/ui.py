@@ -586,13 +586,14 @@ def page_book():
     st.header("Strategy book")
     cfg = D.book_cfg()
     run = cfg.get("run_id", "book_v1")
-    st.caption(f"Ten independent NIFTY option-buying strategies (run `{run}`, paper). Signals come from the NIFTY index "
+    st.caption(f"{len(cfg.get('codes') or [])} independent NIFTY option-buying strategies — base book U1, PB, Q1–Q8 and "
+               f"the parallel set N1–N8 (run `{run}`, paper). Signals come from the NIFTY index "
                "chart, one trade per strategy per day; guard: kill switch only. **Model P&L** follows the "
                "specification (1-minute option bar fills, spec costs) and is comparable with the backtest; "
                "**executable** uses the live ask at the signal and the live bid at the exit.")
     if not cfg.get("enabled"):
         st.warning("The book is disabled in config/paper.yaml (book.enabled).")
-    tab_today, tab_hist, tab_ref = st.tabs(["Today", "Forward-test results", "Strategies"])
+    tab_today, tab_hist, tab_rep, tab_ref = st.tabs(["Today", "Forward-test results", "Daily report", "Strategies"])
     with tab_today:
         _book_today(datetime.now(IST).date().isoformat(), run)
     with tab_hist:
@@ -629,14 +630,47 @@ def page_book():
                     "exit_px", "exit_reason", "net_pnl", "exec_entry_px", "exec_exit_px", "exec_net_pnl", "exec_note"]
             st.dataframe(bt[cols].sort_values(["session_date", "entry_ts"], ascending=False), width="stretch",
                          hide_index=True)
+    with tab_rep:
+        _book_daily_report(cfg)
     with tab_ref:
-        st.dataframe(pd.DataFrame([{"code": s.code, "strategy": s.name, "chart": f"{s.tf} min", "option": s.side,
+        st.dataframe(pd.DataFrame([{"code": s.code, "set": "parallel N" if s.family == "parallel" else "base",
+                                    "strategy": s.name, "chart": f"{s.tf} min", "option": s.side,
                                     "premium target ₹": f"{s.target:g} ({s.band[0]:g}–{s.band[1]:g})",
                                     "exit": {"X1": "stop −15%, trail 15% from +15%",
                                              "E5": "stop −15%, break-even +20%, trail 25% from +40%",
                                              "X2": "fixed stop −15%"}[s.exit] + " · Supertrend flip · 15:15",
                                     "signal": s.summary, "enabled": s.code in set(cfg.get("codes") or [])}
                                    for s in STRATEGIES.values()]), width="stretch", hide_index=True)
+
+
+def _book_daily_report(cfg: dict):
+    """The combined NiftyTradingAI daily P&L report exactly as Telegram receives it after the 15:35 closeout."""
+    import yaml
+    from app.reports.combined import build_combined, format_combined
+    from app.config import PROJECT_ROOT
+    pc = yaml.safe_load((PROJECT_ROOT / "config" / "paper.yaml").read_text(encoding="utf-8"))
+    engs = _engines()
+    src = st.radio("Source", ["Paper run (main database)", "Historical replay (research database)"], horizontal=True,
+                   key="book_rep_src")
+    main = src.startswith("Paper")
+    eng = engs.get("main" if main else "research")
+    if eng is None:
+        st.info("database not found")
+        return
+    rules_run = pc["run_id"] if main else None
+    book_run = cfg.get("run_id", "book_v1") if main else "book_replay"
+    days = D.q(eng, "SELECT DISTINCT session_date FROM CapitalUsage WHERE run_id IN (:a, :b) ORDER BY session_date DESC",
+               a=rules_run or "", b=book_run)
+    if days.empty:
+        st.info("No closed session yet: the report is built at the 15:35 closeout.")
+        return
+    day = st.selectbox("Session", days["session_date"].tolist(), key="book_rep_day")
+    d = build_combined(eng, day, rules_run, list(pc.get("strategies") or []) if rules_run else [], book_run,
+                       list(cfg.get("codes") or []))
+    for part in format_combined(d):
+        st.code(part, language=None)
+    st.caption("Re-send: `.venv\\Scripts\\python scripts\\send_daily_report.py --combined --db "
+               f"{'main' if main else 'research'} --date {day} --send`")
 
 
 @st.fragment(run_every=5)

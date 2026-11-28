@@ -59,6 +59,17 @@ class CostModel:
                 "parts": {k: round(v, 2) for k, v in parts.items()}}
 
 
+def n_cost_model(session: str) -> CostModel:
+    """N1-N8 specification §6 `trade_cost`: the same per-leg formula, with STT and exchange rates by date."""
+    stt = 0.0005 if session < "2023-04-01" else 0.000625 if session < "2024-10-01" else         0.001 if session < "2026-04-01" else 0.0015
+    exch = 0.00053 if session < "2023-04-01" else 0.0005 if session < "2024-01-01" else         0.000495 if session < "2024-10-01" else 0.00035
+    return CostModel(stt_sell_rate=stt, exchange_rate=exch, version="n-cost-1")
+
+
+def cost_model_for(fees: str, session: str) -> CostModel:
+    return n_cost_model(session) if fees == "n" else CostModel()
+
+
 @dataclass
 class Position:
     key: str
@@ -95,6 +106,10 @@ class Position:
         self.exit_ts, self.exit_px, self.exit_reason, self.exit_volume = ts, round(px, 2), reason, volume
         return ts, self.exit_px, reason
 
+    def _stop_reason(self) -> str:
+        """TRAIL_SL once the trail armed; BE_SL when only break-even raised the stop; else the initial SL."""
+        return "TRAIL_SL" if self.armed else ("BE_SL" if self.stop >= self.entry else "SL")
+
     def on_bar(self, bar: dict, minute_of_day: int):
         """One final option bar (ts = start, epoch s). Returns (ts, price, reason) when the position exits."""
         if not self.open or bar["ts"] < self.entry_ts:
@@ -108,9 +123,9 @@ class Position:
         if self.flip_ts is not None and not first and bar["ts"] >= self.flip_ts:
             return self._close(bar["ts"], o, "ST_FLIP", v)
         if not first and o <= self.stop:
-            return self._close(bar["ts"], o, "TRAIL_SL" if self.armed else "SL", v)
+            return self._close(bar["ts"], o, self._stop_reason(), v)
         if l <= self.stop:
-            return self._close(bar["ts"], self.stop, "TRAIL_SL" if self.armed else "SL", v)
+            return self._close(bar["ts"], self.stop, self._stop_reason(), v)
         p = EXIT_PROFILES[self.profile]
         old = self.stop
         self.peak = max(self.peak, h)

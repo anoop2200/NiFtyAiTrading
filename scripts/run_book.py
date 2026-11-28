@@ -33,6 +33,15 @@ REFERENCE = [
     ("Q6", "2026-09-24", "PE", 23350, "13:27", "14:36", 240.40, 290.05, "ST_FLIP", 3142),
     ("Q7", "2026-08-19", "PE", 24300, "09:20", "11:53", 214.75, 221.34, "TRAIL_SL", 343),
     ("Q8", "2026-08-12", "CE", 24400, "14:55", "15:15", 152.85, 145.10, "SQUARE_OFF", -589),
+    # N1-N8 specification §7 (N4, N7, N8 fall before the imported option history starts on 2025-11-26)
+    ("N1", "2026-10-15", "CE", 22700, "09:18", "14:33", 134.45, 338.00, "ST_FLIP", 13146),
+    ("N2", "2026-06-29", "PE", 24250, "09:35", "09:40", 239.60, 203.66, "SL", -2421),
+    ("N3", "2026-10-15", "CE", 22700, "09:30", "14:50", 160.00, 302.65, "ST_FLIP", 9187),
+    ("N4", "2025-07-24", "PE", 25250, "11:57", "12:16", 163.80, 203.11, "TRAIL_SL", 2470),
+    ("N5", "2026-09-15", "PE", 23600, "09:55", "15:15", 203.35, 398.30, "SQUARE_OFF", 12587),
+    ("N6", "2026-08-14", "CE", 24250, "13:50", "15:15", 208.45, 202.00, "SQUARE_OFF", -504),
+    ("N7", "2025-07-30", "CE", 24650, "14:00", "15:15", 237.40, 231.80, "SQUARE_OFF", -449),
+    ("N8", "2025-10-06", "CE", 24800, "09:42", "13:51", 156.70, 284.10, "ST_FLIP", 8196),
 ]
 
 
@@ -40,8 +49,17 @@ def cmd_validate(a) -> int:
     root = settings().path("historical")
     index = R.load_index(root)
     rows, ok_all = [], True
+    only = set(a.codes.split(",")) if getattr(a, "codes", None) else None
     for code, day, side, strike, e_t, x_t, e_px, x_px, reason, net in REFERENCE:
-        e = R.run_day(day, index, R.load_options(root, day), codes=[code])
+        if only and code not in only:
+            continue
+        opts = R.load_options(root, day)
+        if opts.empty:
+            rows.append({"code": code, "name": STRATEGIES[code].name, "date": day, "match": None,
+                         "spec": f"{strike} {e_t}->{x_t} {e_px}->{x_px} {reason} {net}", "ours": "-",
+                         "note": "not checkable: no imported option history for this day"})
+            continue
+        e = R.run_day(day, index, opts, codes=[code])
         t = e.trades[0] if e.trades else None
         got = {"strike": None, "entry": None, "exit": None, "entry_px": None, "exit_px": None, "reason": None,
                "net": None}
@@ -64,6 +82,12 @@ def cmd_validate(a) -> int:
                 note += " (the 09:15 bar is missing from the index store - refetch with backfill_vix.py --nifty)"
         elif not match and strike is not None and got["strike"] != strike:
             note = "different strike chosen: the imported option history (ATM +/- 5) differs from the spec's data"
+        elif not match and got["entry"] == e_t and got["exit"] > x_t:
+            k = opts[opts["key"] == t["contract"]]
+            mins = {pd.Timestamp(int(x), unit="s", tz="Asia/Kolkata").strftime("%H:%M") for x in k["ts"]}
+            if x_t not in mins:
+                note = (f"same entry; the contract has no imported bar at the spec's exit {x_t} (strike drifted "
+                        f"outside the imported ATM +/- 5), so the exit is delayed")
         rows.append({"code": code, "name": STRATEGIES[code].name, "date": day, "match": match,
                      "spec": f"{strike or ''} {e_t}->{x_t} {e_px or ''}->{x_px or ''} {reason} {net}",
                      "ours": f"{got['strike'] or ''} {got['entry']}->{got['exit']} {got['entry_px']}->{got['exit_px']} "
@@ -71,7 +95,9 @@ def cmd_validate(a) -> int:
     df = pd.DataFrame(rows)
     with pd.option_context("display.max_colwidth", 120, "display.width", 250):
         print(df.to_string(index=False))
-    print(f"\n{int(df['match'].sum())} of {len(df)} reference trades reproduced exactly")
+    chk = df[df["match"].notna()]
+    print(f"\n{int(chk['match'].astype(bool).sum())} of {len(chk)} checkable reference trades reproduced exactly"
+          f" ({len(df) - len(chk)} not checkable)")
     return 0 if ok_all else 1
 
 
@@ -140,7 +166,8 @@ def cmd_strategies(a) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("validate")
+    va = sub.add_parser("validate")
+    va.add_argument("--codes", help="comma-separated codes (default all)")
     rp = sub.add_parser("replay")
     rp.add_argument("--from", dest="d_from")
     rp.add_argument("--to", dest="d_to")

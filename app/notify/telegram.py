@@ -42,6 +42,7 @@ class NotifyPolicy:
     throttle_s: dict = field(default_factory=lambda: {"rejected": 60.0, "candidate": 10.0, "data": 120.0})
     default_throttle_s: float = 0.0
     daily_cap: int = 150         # non-critical messages per IST day
+    cap_exempt: tuple = ("daily_pnl",)   # the end-of-day report is never held back by the daily cap
 
 
 # ---------------------------------------------------------------------------------------------- transports
@@ -143,7 +144,7 @@ class Notifier:
         lk = self.last_by_kind.get(alert.kind)
         if thr and lk is not None and now - lk < thr:
             return self._suppress(alert, "THROTTLED")
-        if self.sent_today.get(self._day(), 0) >= p.daily_cap:
+        if alert.kind not in p.cap_exempt and self.sent_today.get(self._day(), 0) >= p.daily_cap:
             return self._suppress(alert, "CAPPED")
         return self._deliver(alert, text)
 

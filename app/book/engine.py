@@ -30,7 +30,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from app.book.exits import CostModel, Position
+from app.book.exits import CostModel, Position, cost_model_for
 from app.book.strategies import STRATEGIES, StrategyDef, chart_signals, flip_close_ts
 from app.clock import IST
 
@@ -64,7 +64,8 @@ class BookEngine:
                  run_id: str = "book_v1"):
         self.session, self.qty, self.run_id = session, int(qty), run_id
         self.codes = [c for c in STRATEGIES if c in set(codes)]
-        self.cost = cost or CostModel()
+        self.cost = cost                                # None: each strategy's own specification schedule
+        self._costs: dict[str, CostModel] = {}
         self.kill_fn = kill_fn or (lambda: None)        # -> reason string when entries are blocked
         self.listener = listener                        # callable(kind, payload) for notifications
         cols = warmup or {}
@@ -95,6 +96,14 @@ class BookEngine:
         self.finished = False
         self._full_day: pd.DataFrame | None = None                            # replay only (see precompute_day)
         self._full_charts: dict[int, tuple] = {}
+
+    def cost_for(self, code: str) -> CostModel:
+        if self.cost is not None:
+            return self.cost
+        f = STRATEGIES[code].fees
+        if f not in self._costs:
+            self._costs[f] = cost_model_for(f, self.session)
+        return self._costs[f]
 
     def precompute_day(self, today_bars: pd.DataFrame) -> None:
         """REPLAY ONLY: hand over the whole day's index bars in advance so each chart is computed once per day.
@@ -368,9 +377,9 @@ class BookEngine:
         sd, st = STRATEGIES[code], self.state[code]
         pos: Position = st["pos"]
         info = st["info"]
-        c = self.cost.round_trip(pos.entry, pos.exit_px, pos.qty, pos.entry_volume, pos.exit_volume)
+        c = self.cost_for(code).round_trip(pos.entry, pos.exit_px, pos.qty, pos.entry_volume, pos.exit_volume)
         gross = (pos.exit_px - pos.entry) * pos.qty
-        if pos.exit_reason in ("SL", "TRAIL_SL"):
+        if pos.exit_reason in ("SL", "BE_SL", "TRAIL_SL"):
             ex = self._exec_price(pos.key, pos.exit_ts * NS, "bid", (pos.exit_ts + 60) * NS, pos.stop_at_exit_bar)
         elif pos.exit_reason == "END":
             q = self._quotes.get(pos.key)
@@ -381,7 +390,7 @@ class BookEngine:
         en = info["exec_entry"]
         exec_net = None
         if en["px"] is not None and ex["px"] is not None:
-            ec = self.cost.round_trip(en["px"], ex["px"], pos.qty, slippage=False)
+            ec = self.cost_for(code).round_trip(en["px"], ex["px"], pos.qty, slippage=False)
             exec_net = round((ex["px"] - en["px"]) * pos.qty - ec["total"], 2)
         risk = pos.entry * 0.15 * pos.qty
         t = {"trade_id": info["trade_id"], "code": code, "strategy_id": sd.sid, "name": sd.name, "side": sd.side,
@@ -393,7 +402,8 @@ class BookEngine:
              "r_multiple": round((gross - c["total"]) / risk, 4) if risk else None,
              "exec_entry_px": en["px"], "exec_exit_px": ex["px"], "exec_net_pnl": exec_net,
              "exec_note": "; ".join(x for x in (en.get("note"), ex.get("note")) if x) or None,
-             "cost": c, "features": info["features"], "trail": pos.trail_history,
+             "cost": c, "fee_version": self.cost_for(code).version, "features": info["features"],
+             "trail": pos.trail_history,
              "entry_ns": pos.entry_ts * NS, "exit_ns": pos.exit_ts * NS}
         self.trades.append(t)
         if self.listener:

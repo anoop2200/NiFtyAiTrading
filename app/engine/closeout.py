@@ -193,8 +193,7 @@ def close_book(db: Engine, session) -> dict | None:
     from app.book.persist import persist_day
     try:
         b.finish()
-        persist_day(db, b.run_id, session.spec.session, b.trades, b.signals, mode=session.spec.mode,
-                    fee_version=b.cost.version)
+        persist_day(db, b.run_id, session.spec.session, b.trades, b.signals, mode=session.spec.mode)
         return {"run_id": b.run_id, **b.summary()}
     except Exception as e:  # noqa: BLE001
         session._incident("BOOK_CLOSEOUT_FAILED", {"error": repr(e)[:300]}, critical=True)
