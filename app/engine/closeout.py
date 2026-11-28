@@ -159,6 +159,7 @@ def closeout(db: Engine, session) -> dict:
     persist_session(db, session.broker, sp.run_id, sp.session, mode=sp.mode)
     persist_signals(db, sp.run_id, sp.session, session.pipe.signals, session.broker.trades, session.risk.state.events)
     persist_labels(db, sp.run_id, sp.session, labels)
+    book = close_book(db, session)
     session.write_carry()
     unresolved = [i for i in session.incidents if not i["resolved"]]
     status = "COMPLETED" if rec["ok"] and not unresolved else "COMPLETED_WITH_INCIDENTS"
@@ -180,7 +181,24 @@ def closeout(db: Engine, session) -> dict:
             row.restarts = session.recovery["restart"]
         s.commit()
     return {"status": status, "reconciliation": rec, "labels": len(labels), "trades": len(session.broker.trades),
-            "signals": len(session.pipe.signals), "incidents": session.incidents}
+            "signals": len(session.pipe.signals), "incidents": session.incidents, "book": book}
+
+
+def close_book(db: Engine, session) -> dict | None:
+    """Strategy book (its own paper run): close what is still open, persist the day. A failure here is an
+    incident of the session, never a reason to lose the main run's closeout."""
+    b = getattr(session, "book", None)
+    if b is None:
+        return None
+    from app.book.persist import persist_day
+    try:
+        b.finish()
+        persist_day(db, b.run_id, session.spec.session, b.trades, b.signals, mode=session.spec.mode,
+                    fee_version=b.cost.version)
+        return {"run_id": b.run_id, **b.summary()}
+    except Exception as e:  # noqa: BLE001
+        session._incident("BOOK_CLOSEOUT_FAILED", {"error": repr(e)[:300]}, critical=True)
+        return {"run_id": b.run_id, "error": repr(e)[:300]}
 
 
 def resolve_incident(db: Engine, run_id: str, session_date: str, actor: str, note: str) -> None:

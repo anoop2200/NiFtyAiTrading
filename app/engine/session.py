@@ -60,6 +60,7 @@ class SessionSpec:
     market_close: str = "15:30"
     fill: dict = field(default_factory=lambda: asdict(FillConfig()))
     checkpoint_every: int = 2000
+    book: dict | None = None                      # strategy book (app.book): {run_id, codes} - its own paper run
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -94,7 +95,8 @@ class PaperSession:
     def __init__(self, spec: SessionSpec, journal_path: Path, fees: FeeSchedule, cal, events,
                  kill_file: Path | None = None, commands: Path | None = None, carry_file: Path | None = None,
                  notifier=None, risk_config_path: Path | None = None, warmup: dict | None = None,
-                 strategy_factory=None, _recovering: bool = False):
+                 strategy_factory=None, book_warmup: dict | None = None, with_book: bool = True,
+                 _recovering: bool = False):
         from app.research.spec import build_strategies
         self.spec, self.fees, self.cal = spec, fees, cal
         self.kill_file, self.commands, self.carry_file = kill_file, commands, carry_file
@@ -125,9 +127,20 @@ class PaperSession:
         self.carry_in = self._read_carry()
         self.journal = Journal(journal_path)
         self.warmup_bars = self._warm(warmup or {})
+        # strategy book: a second, independent paper run on the same journaled inputs (deterministic -> recovery
+        # replays it too). with_book=False: the dashboard's shadow skips it (it reads the engine's book snapshot).
+        self.book = None
+        if spec.book and with_book:
+            from app.book.engine import BookEngine
+            self.book = BookEngine(spec.session, spec.lot_size, spec.book.get("codes") or (),
+                                   book_warmup or {}, kill_fn=self.kill.blocking_reason, listener=self._book_event,
+                                   run_id=spec.book.get("run_id", "book_v1"))
         if not _recovering:
-            self._write({"k": "start", "at": iso(), "spec": spec.to_json(), "carry": self.carry_in,
-                         "warmup": warmup or {}})
+            start = {"k": "start", "at": iso(), "spec": spec.to_json(), "carry": self.carry_in,
+                     "warmup": warmup or {}}
+            if spec.book:
+                start["book_warmup"] = book_warmup or {}
+            self._write(start)
             self._open_risk_session(spec.gap_ratio if spec.prior_daily is None else None, defer=spec.prior_daily is not None)
 
     # ------------------------------------------------------------------ session lifecycle helpers
@@ -220,7 +233,13 @@ class PaperSession:
             q = rec_quote(r)
             self.engine.on_quote(q)
             self.last_quote_ns = q.ts_ns
+            if self.book is not None:
+                self.book.on_quote(q.key, q.ts_ns, q.ltp, q.bid, q.ask, q.volume, q.ltt)
         elif k == "b":
+            if self.book is not None:
+                if r["s"] == "index":
+                    self.book.on_index_bar(r["bar"], r["t"])
+                self.book.on_time(r["t"])
             if not self.started and r["s"] == "index":
                 self._open_risk_session(gap_ratio_from(self.spec.prior_daily or [], r["bar"]["open"]))
             if self.started or r["s"] == "vix":
@@ -231,6 +250,8 @@ class PaperSession:
         elif k == "t":
             self.engine.tick(r["t"])
             self._watchdog(r["t"])
+            if self.book is not None:
+                self.book.on_time(r["t"])
         elif k == "kill":
             self.kill.manual, self.kill.emergency_close = r["manual"], r["emergency_close"] and r["manual"]
             self.kill_seen = {"manual": r["manual"], "emergency_close": r["emergency_close"]}
@@ -296,6 +317,22 @@ class PaperSession:
         elif kind == "trade_closed":
             self.notifier.send(trade_alert(payload["trade"]))
 
+    def _book_event(self, kind: str, p: dict) -> None:
+        """Strategy-book notifications (entries and exits; signals that could not trade are in the daily report)."""
+        if self.muted or not self.notifier or kind not in ("entry", "exit"):
+            return
+        from app.notify.telegram import INFO, Alert
+        if kind == "entry":
+            txt = (f"📒 Book entry: {p['name']} ({p['code']}) {p['contract']} @ {p['entry_px']:.2f} "
+                   f"({p['entry_ts'][11:16]})" + (f", live ask {p['exec_ask']:.2f}" if p.get("exec_ask") else ""))
+            key = f"book_entry|{p['trade_id']}"
+        else:
+            txt = (f"📒 Book exit: {p['name']} ({p['code']}) {p['contract']} {p['entry_px']:.2f}→{p['exit_px']:.2f} "
+                   f"{p['exit_reason']} net ₹{p['net_pnl']:,.0f}"
+                   + (f" (executable ₹{p['exec_net_pnl']:,.0f})" if p.get("exec_net_pnl") is not None else ""))
+            key = f"book_exit|{p['trade_id']}"
+        self.notifier.send(Alert("book", INFO, txt, key=key))
+
     def _alert_new_signals(self) -> None:
         new = self.pipe.signals[self._signals_alerted:]
         self._signals_alerted = len(self.pipe.signals)
@@ -317,7 +354,8 @@ class PaperSession:
             raise ValueError("session already ended cleanly; nothing to recover")
         spec = SessionSpec.from_json(recs[0]["spec"])
         notifier = kw.pop("notifier", None)
-        s = cls(spec, journal_path, fees, cal, events, _recovering=True, warmup=recs[0].get("warmup"), **kw)
+        s = cls(spec, journal_path, fees, cal, events, _recovering=True, warmup=recs[0].get("warmup"),
+                book_warmup=recs[0].get("book_warmup"), **kw)
         s.carry_in = recs[0].get("carry") or {}
         s._open_risk_session(spec.gap_ratio if spec.prior_daily is None else None, defer=spec.prior_daily is not None)
         mismatches = []

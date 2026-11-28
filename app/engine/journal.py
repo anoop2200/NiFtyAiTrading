@@ -22,13 +22,18 @@ from app.backtest.fills import Quote
 
 
 def quote_rec(q: Quote) -> dict:
-    return {"k": "q", "t": q.ts_ns, "key": q.key, "b": [list(x) for x in q.bids], "a": [list(x) for x in q.asks],
-            "l": q.ltp, "tier": q.tier, "d": q.has_depth}
+    r = {"k": "q", "t": q.ts_ns, "key": q.key, "b": [list(x) for x in q.bids], "a": [list(x) for x in q.asks],
+         "l": q.ltp, "tier": q.tier, "d": q.has_depth}
+    if q.volume is not None:                       # since 28 Nov 2026 (strategy book); older journals lack them
+        r["v"] = q.volume
+    if q.ltt is not None:
+        r["lt"] = q.ltt
+    return r
 
 
 def rec_quote(r: dict) -> Quote:
     return Quote(r["t"], r["key"], tuple((float(p), int(n)) for p, n in r["b"]),
-                 tuple((float(p), int(n)) for p, n in r["a"]), r["l"], r["tier"], r["d"])
+                 tuple((float(p), int(n)) for p, n in r["a"]), r["l"], r["tier"], r["d"], r.get("v"), r.get("lt"))
 
 
 class Journal:

@@ -581,7 +581,95 @@ def _live_session(day: str):
         st.dataframe(pd.DataFrame(ev), width="stretch", hide_index=True)
 
 
-PAGES = {"Live session": page_live, "Home / health": page_home, "Market monitor": page_market, "Signals": page_signals,
+def page_book():
+    from app.book.strategies import STRATEGIES
+    st.header("Strategy book")
+    cfg = D.book_cfg()
+    run = cfg.get("run_id", "book_v1")
+    st.caption(f"Ten independent NIFTY option-buying strategies (run `{run}`, paper). Signals come from the NIFTY index "
+               "chart, one trade per strategy per day; guard: kill switch only. **Model P&L** follows the "
+               "specification (1-minute option bar fills, spec costs) and is comparable with the backtest; "
+               "**executable** uses the live ask at the signal and the live bid at the exit.")
+    if not cfg.get("enabled"):
+        st.warning("The book is disabled in config/paper.yaml (book.enabled).")
+    tab_today, tab_hist, tab_ref = st.tabs(["Today", "Forward-test results", "Strategies"])
+    with tab_today:
+        _book_today(datetime.now(IST).date().isoformat(), run)
+    with tab_hist:
+        engs = _engines()
+        src = st.radio("Results", [f"Forward test ({run}, main database)",
+                                   "Historical replay (book_replay, research database)"], horizontal=True)
+        name, rid = ("main", run) if src.startswith("Forward") else ("research", "book_replay")
+        bt = D.book_trades(engs[name], rid) if name in engs else pd.DataFrame()
+        if bt.empty:
+            st.info("No closed book trades yet. Forward-test results reach the database at the 15:35 closeout; "
+                    "replays: scripts/run_book.py replay --persist.")
+        else:
+            days = sorted(bt["session_date"].unique())
+            st.caption(f"{len(days)} sessions · {days[0]} → {days[-1]}")
+            m = st.columns(4)
+            m[0].metric("Trades", len(bt))
+            m[1].metric("Win rate", f"{100 * (bt.net_pnl > 0).mean():.0f}%")
+            m[2].metric("Net ₹ (model)", f"{bt.net_pnl.sum():,.0f}")
+            ex = bt.exec_net_pnl.dropna()
+            m[3].metric("Net ₹ (executable)", f"{ex.sum():,.0f}" if len(ex) else "–",
+                        help="same trades priced at the live ask / bid")
+            st.subheader("Per strategy")
+            st.dataframe(D.book_summary(bt), width="stretch", hide_index=True)
+            st.subheader("Daily P&L per strategy (model, ₹)")
+            names = {c: f"{c} {s.name}" for c, s in STRATEGIES.items()}
+            piv = bt.assign(strategy=bt["code"].map(names)).pivot_table(
+                index="session_date", columns="strategy", values="net_pnl", aggfunc="sum", fill_value=0.0)
+            piv["TOTAL"] = piv.sum(axis=1)
+            st.dataframe(piv.sort_index(ascending=False).round(0), width="stretch")
+            st.subheader("Cumulative P&L (model)")
+            st.line_chart(piv.drop(columns="TOTAL").cumsum(), height=280)
+            st.subheader("All trades")
+            cols = ["session_date", "code", "name", "contract", "signal_ts", "entry_ts", "exit_ts", "entry_px",
+                    "exit_px", "exit_reason", "net_pnl", "exec_entry_px", "exec_exit_px", "exec_net_pnl", "exec_note"]
+            st.dataframe(bt[cols].sort_values(["session_date", "entry_ts"], ascending=False), width="stretch",
+                         hide_index=True)
+    with tab_ref:
+        st.dataframe(pd.DataFrame([{"code": s.code, "strategy": s.name, "chart": f"{s.tf} min", "option": s.side,
+                                    "premium target ₹": f"{s.target:g} ({s.band[0]:g}–{s.band[1]:g})",
+                                    "exit": {"X1": "stop −15%, trail 15% from +15%",
+                                             "E5": "stop −15%, break-even +20%, trail 25% from +40%",
+                                             "X2": "fixed stop −15%"}[s.exit] + " · Supertrend flip · 15:15",
+                                    "signal": s.summary, "enabled": s.code in set(cfg.get("codes") or [])}
+                                   for s in STRATEGIES.values()]), width="stretch", hide_index=True)
+
+
+@st.fragment(run_every=5)
+def _book_today(day: str, run: str):
+    snap = D.book_snapshot(day, run)
+    if not snap:
+        st.info(f"No book activity for {day} yet: the engine writes it while it runs (start_trading_day.bat).")
+        return
+    sm = snap["summary"]
+    age = (datetime.now(IST) - datetime.fromisoformat(snap["at"])).total_seconds()
+    st.caption(f"engine snapshot {snap['at'][11:19]} ({age:.0f}s ago)" + (" · day closed" if snap["finished"] else "")
+               + f" · warm-up {sm.get('warmup_bars')} index bars · today {sm.get('index_bars_today')} bars")
+    if not snap["finished"] and age > 30:
+        st.error(f"Book snapshot is {age:.0f}s old — check the engine window.")
+    m = st.columns(4)
+    m[0].metric("Trades today", sm["trades"])
+    m[1].metric("Open now", len(sm.get("open") or []))
+    m[2].metric("Net ₹ (model)", f"{sm['net_pnl']:,.0f}")
+    m[3].metric("Net ₹ (executable)", "–" if sm.get("exec_net_pnl") is None else f"{sm['exec_net_pnl']:,.0f}")
+    st.subheader("Strategies")
+    st.dataframe(pd.DataFrame(snap["status"]), width="stretch", hide_index=True)
+    if snap["trades"]:
+        st.subheader("Closed trades")
+        st.dataframe(pd.DataFrame(snap["trades"]).drop(columns=["trail", "entry_ns", "exit_ns"], errors="ignore"),
+                     width="stretch", hide_index=True)
+    if snap["signals"]:
+        st.subheader("Signals")
+        sg = pd.DataFrame(snap["signals"])
+        keep = [c for c in ("ts", "code", "name", "outcome", "reason", "contract", "entry_px") if c in sg]
+        st.dataframe(sg[keep].iloc[::-1], width="stretch", hide_index=True)
+
+
+PAGES = {"Live session": page_live, "Strategy book": page_book, "Home / health": page_home, "Market monitor": page_market, "Signals": page_signals,
          "Paper trades": page_trades, "Performance": page_performance, "Backtests & research": page_research,
          "Config & kill switch": page_config}
 

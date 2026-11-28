@@ -28,7 +28,7 @@ async def fetch(cfg, days: list[str], security_id: int, name: str = "india_vix")
     out = []
     try:
         for day in days:
-            r = await rest.intraday_candles(security_id, "IDX_I", "INDEX", f"{day} 09:15:00", f"{day} 15:30:00")
+            r = await rest.intraday_candles(security_id, "IDX_I", "INDEX", f"{day} 09:00:00", f"{day} 15:30:00")  # fromDate is exclusive: 09:15 would drop the 09:15 bar
             if r.status != 200:
                 out.append({"day": day, "error": f"HTTP {r.status}: {r.text[:160]}"})
                 continue

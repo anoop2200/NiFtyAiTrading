@@ -25,6 +25,8 @@ class Quote:
     ltp: float | None = None
     tier: str = "observed_feed"           # observed_feed (depth) | observed_top_of_book_snapshot | ...
     has_depth: bool = True                 # False -> only top of book is known
+    volume: int | None = None              # cumulative day volume (live feed; strategy-book option bars)
+    ltt: int | None = None                 # exchange last-trade time, epoch s (live feed)
 
     @property
     def bid(self) -> float | None:

@@ -175,7 +175,10 @@ async def _live(a) -> int:
         logger.error(f"implausible lot size {lot} from the instrument master")
         return 2
     future = p.universe.futures[0].security_id if p.universe.futures else None
-    hist = pd.DataFrame() if unfinished else await _index_history_live(cfg, cal, today, logger)
+    book_cfg = pc.get("book") or {}
+    book_on = bool(book_cfg.get("enabled"))
+    n_hist = max(20, int(book_cfg.get("warmup_sessions", 35)) + 1) if book_on else 20
+    hist = pd.DataFrame() if unfinished else await _index_history_live(cfg, cal, today, logger, n_hist)
     if unfinished:
         s = PaperSession.recover(jp, fees, cal, events, kill_file=kill_file, commands=commands, carry_file=carry_file,
                                  notifier=notifier)
@@ -191,10 +194,13 @@ async def _live(a) -> int:
                            overrides={"require_futures": bool(pc["require_futures"])},
                            prior_daily=prior_daily(hist, day) if len(hist) else None,
                            feed_liveness_s=pc["feed_liveness_s"], selection_quote_age_s=pc["selection_quote_age_s"],
-                           feed_outage_s=pc["feed_outage_s"], checkpoint_every=pc["checkpoint_every"])
+                           feed_outage_s=pc["feed_outage_s"], checkpoint_every=pc["checkpoint_every"],
+                           book=_book_spec(book_cfg, smoke) if book_on else None)
+        book_warmup = (await _book_warmup(cfg, hist, day, int(book_cfg.get("warmup_sessions", 35)), logger)
+                       if book_on else None)
         s = PaperSession(spec, jp, fees, cal, events, kill_file=kill_file, commands=commands, carry_file=carry_file,
                          notifier=notifier, warmup=warmup_bars(hist, day, pc.get("warmup_sessions", 10)) if len(hist)
-                         else None)
+                         else None, book_warmup=book_warmup)
         logger.info(f"indicator warm-up: {s.warmup_bars} index bars; prior days: {len(spec.prior_daily or [])}")
     open_session_row(db, s, code_fingerprint())
     adapter = LiveAdapter(s, today, p.universe.index.security_id, future, p.universe.options,
@@ -203,12 +209,19 @@ async def _live(a) -> int:
     rec.taps.append(adapter.on_rows)
 
     async def clock():
+        last_snap = 0.0
         while now_ist() < end_at:
             try:
                 adapter.tick(time.time_ns())
             except Exception as e:  # noqa: BLE001
                 logger.error(f"engine tick failed: {e!r}")
                 s.kill.trip("RISK_EVALUATION_ERROR", repr(e)[:200])
+            if s.book is not None and time.monotonic() - last_snap >= 5:
+                last_snap = time.monotonic()
+                try:
+                    write_book_snapshot(s.book, day)
+                except Exception as e:  # noqa: BLE001 - display only
+                    logger.warning(f"book snapshot failed: {e!r}")
             await asyncio.sleep(pc["tick_s"])
 
     ticker = asyncio.create_task(clock())
@@ -217,8 +230,88 @@ async def _live(a) -> int:
     r = closeout(db, s)
     logger.info(f"recorder {status}; {_summary(day, r)}; adapter errors {adapter.errors}")
     _report(db, run_id, day, notifier)
+    if s.book is not None:
+        write_book_snapshot(s.book, day)
+        _book_report(db, s.book, day, notifier, r.get("book"))
     notifier.flush_digest()
     return 0 if r["status"] == "COMPLETED" else 1
+
+
+def _book_spec(book_cfg: dict, smoke: bool) -> dict:
+    rid = book_cfg.get("run_id", "book_v1")
+    return {"run_id": f"smoke_{rid}" if smoke else rid, "codes": list(book_cfg.get("codes") or [])}
+
+
+def book_snapshot_path(run_id: str, day: str) -> Path:
+    return PROJECT_ROOT / "data" / "paper" / run_id / f"{day}.live.json"
+
+
+def write_book_snapshot(book, day: str) -> None:
+    """Display-only state of the strategy book for the dashboard (authoritative results: closeout -> database)."""
+    from app.clock import now_ist
+    p = book_snapshot_path(book.run_id, day)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    snap = {"at": now_ist().isoformat(timespec="seconds"), "session": day, "run_id": book.run_id,
+            "summary": book.summary(), "status": book.status(), "signals": book.signals[-200:],
+            "trades": [{k: v for k, v in t.items() if k not in ("features", "cost")} for t in book.trades],
+            "finished": book.finished}
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(snap, default=str), encoding="utf-8")
+    tmp.replace(p)
+
+
+async def _book_warmup(cfg, hist, day: str, sessions: int, logger) -> dict:
+    """35 sessions of index bars + (late start) today's completed bars so far, so VWAP / opening range / the
+    first-candle rule see the whole day. Stored in the journal's start record -> recovery warms up identically."""
+    from app.book.engine import warmup_columns
+    from app.clock import now_ist
+    w = (warmup_columns(hist, day, sessions) if len(hist)
+         else {"ts": [], "open": [], "high": [], "low": [], "close": [], "sessions": []})
+    if len(w["sessions"]) < sessions:
+        logger.warning(f"strategy book warm-up: only {len(w['sessions'])} of {sessions} sessions available")
+    now = now_ist()
+    if (now.hour, now.minute) <= (9, 15):
+        return w
+    from app.data.dhan_rest import DhanRest
+    from app.historical import vix as store
+    from app.secrets import get_secret
+    rest = DhanRest(cfg.get("dhan.rest_base"), get_secret("DHAN_CLIENT_ID"), get_secret("DHAN_ACCESS_TOKEN"),
+                    cfg.get("dhan.option_chain_min_interval_s"), cfg.get("dhan.market_quote_min_interval_s"))
+    try:
+        r = await rest.intraday_candles(13, "IDX_I", "INDEX", f"{day} 09:00:00", now.strftime("%Y-%m-%d %H:%M:%S"))
+        bars = store.candles_to_bars(r.body, day) if r.status == 200 else None
+        if bars is not None and len(bars):
+            done = bars[bars["ts"] + 60 <= int(now.timestamp()) - 2]          # completed minutes only
+            w["ts"] += [int(x) for x in done["ts"]]
+            for c in ("open", "high", "low", "close"):
+                w[c] += [round(float(x), 2) for x in done[c]]
+            w["today_bars"] = int(len(done))
+            logger.info(f"strategy book: late start, {len(done)} of today's index bars loaded")
+        else:
+            logger.warning(f"strategy book: today's bars unavailable (HTTP {r.status}); "
+                           "VWAP / opening range start from the first live bar")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"strategy book: today's bars fetch failed: {e!r}")
+    finally:
+        await rest.close()
+    return w
+
+
+def _book_report(db, book, day, notifier, closeout_info) -> None:
+    from app.book.persist import strategy_report
+    from app.notify.telegram import INFO, Alert
+    hist = None
+    try:
+        from app.dashboard.data import q
+        hist = q(db, "SELECT code, net_pnl FROM BookTrades WHERE run_id = :r", r=book.run_id)
+    except Exception:  # noqa: BLE001
+        pass
+    text = strategy_report(book.run_id, day, book.trades, book.signals, book.codes, hist)
+    if closeout_info and closeout_info.get("error"):
+        text += f"\nbook closeout error: {closeout_info['error']}"
+    print(text)
+    if notifier:
+        notifier.send(Alert("daily_pnl", INFO, text, key=f"daily|{book.run_id}|{day}"))
 
 
 def late_start_strategies(strategies: tuple, now) -> tuple:
@@ -229,14 +322,14 @@ def late_start_strategies(strategies: tuple, now) -> tuple:
     return strategies
 
 
-async def _index_history_live(cfg, cal, today, logger):
-    """The 20 sessions before today from the NIFTY 1-minute store, fetching any missing ones from Dhan first."""
+async def _index_history_live(cfg, cal, today, logger, sessions: int = 20):
+    """The sessions before today from the NIFTY 1-minute store, fetching any missing ones from Dhan first."""
     import pandas as pd
     from app.data.dhan_rest import DhanRest
     from app.engine import live_history as lh
     from app.secrets import get_secret
     root = cfg.path("historical")
-    want = lh.needed_sessions(cal, today, 20)
+    want = lh.needed_sessions(cal, today, sessions)
     gaps = lh.missing(root, want)
     if gaps:
         rest = DhanRest(cfg.get("dhan.rest_base"), get_secret("DHAN_CLIENT_ID"), get_secret("DHAN_ACCESS_TOKEN"),

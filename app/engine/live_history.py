@@ -27,7 +27,7 @@ def needed_sessions(cal, day: date, n: int) -> list[str]:
     return sorted(out)
 
 
-def missing(historical_root, sessions: list[str], min_bars: int = 370) -> list[str]:
+def missing(historical_root, sessions: list[str], min_bars: int = 375) -> list[str]:
     df = store.load(historical_root, sessions, name=NAME)
     per = df.groupby("session").size().to_dict() if len(df) else {}
     return [s for s in sessions if per.get(s, 0) < min_bars]
@@ -37,7 +37,7 @@ async def fetch_missing(rest, historical_root, sessions: list[str], security_id:
     """Fetch sessions from Dhan intraday candles into the store; returns {session: bars | error}."""
     out = {}
     for day in sessions:
-        r = await rest.intraday_candles(security_id, "IDX_I", "INDEX", f"{day} 09:15:00", f"{day} 15:30:00")
+        r = await rest.intraday_candles(security_id, "IDX_I", "INDEX", f"{day} 09:00:00", f"{day} 15:30:00")  # fromDate is exclusive: 09:15 would drop the 09:15 bar
         if r.status != 200:
             out[day] = f"HTTP {r.status}"
             continue

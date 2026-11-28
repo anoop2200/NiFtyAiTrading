@@ -89,6 +89,48 @@ engine warms its indicators on (fetched if missing). Exit 0 = OK, 1 = warnings, 
 `smoke_paper_rules_v1`, research DB, alerts to `data\paper\smoke_paper_rules_v1\_runtime\telegram_outbox.jsonl`.
 API check: `scripts\smoke_test.py --ws-seconds 30`.
 
+## Strategy book — ten-strategy forward test (run `book_v1`)
+
+Implements "NIFTY Options Strategy Book — Implementation Specification" (`app/book/`). It runs inside the same
+paper engine and feed as its own run (`book_v1`) next to ORB/pullback (`paper_rules_v1`). Each strategy finds its own
+signal and takes at most one trade a day. The only guard is the kill switch: it blocks new entries, and a running
+trade still exits by its own rules. Turn it on or off and pick strategies in `config/paper.yaml` → `book:`.
+
+| Code | Name | Chart | Exit |
+|---|---|---|---|
+| U1 | Call · Pivot Breakout | 3 min | X1 |
+| PB | Put · Opening-Range Breakdown | 3 min | X1 |
+| Q1 | Call · Momentum Surge | 3 min | E5 |
+| Q2 | Call · Afternoon Trend Ride | 3 min | E5 |
+| Q3 | Call · Afternoon VWAP Burst | 5 min | X1 |
+| Q4 | Call · VWAP Breakout | 3 min | X1 |
+| Q5 | Put · Morning VWAP Flush | 1 min | X1 |
+| Q6 | Put · Afternoon Slide | 1 min | E5 |
+| Q7 | Put · Trend Breakdown | 5 min | X1 |
+| Q8 | Call · Afternoon Scalp | 1 min | X2 |
+
+`scripts\run_book.py strategies` prints the full rules.
+
+- **Signals:**
+  - Signals come from closed NIFTY index candles, over 35 warm-up sessions plus today.
+  - Entry is at the open of the next 1-minute option bar.
+  - The strike is the one whose premium is closest to the strategy's target band.
+  - Exits are on the option premium: stop, break-even or trail, a Supertrend flip on the index chart, or 15:15 square-off.
+- **Two P&L figures per trade:**
+  - **model**: the specification's bar fills, slippage and costs, so it is comparable with the backtest;
+  - **executable**: the live ask at the signal and the live bid at the exit, with the same costs and no slippage.
+- **Where to see it:**
+  - Dashboard **Strategy book → Today** shows a live snapshot the engine writes every 5 s.
+  - Telegram sends an alert at each entry and exit.
+  - At the 15:35 closeout the trades go to `BookTrades`, `PaperTrades`, `TradingSignals` and `CapitalUsage`. The
+    **Forward-test results** tab then shows per-strategy daily P&L, cumulative P&L and drawdown.
+- **Recovery:** the book is rebuilt from the journal like the rest of the engine. A strategy whose signal fired
+  before a late start is marked `ENGINE_STARTED_LATE` for that day.
+- **Validation and replays** use research-tier data: trade prices, ATM ±5 strikes only.
+  - `.venv\Scripts\python scripts\run_book.py validate` checks the specification's reference trades (§7.3).
+  - `run_book.py replay --from 2026-09-01 --to 2026-10-16 [--codes Q1,Q4] [--persist]` writes CSVs to
+    `data\backtests\book`. With `--persist` it also writes run `book_replay` to the research DB, shown in the same tab.
+
 ## Historical import from optionchain_db (read-only)
 
 Source: `public.filtered_option_data` — ~10-second NIFTY snapshots, ATM ±5, with LTP, OI, volume, IV, Greeks,

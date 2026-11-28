@@ -12,3 +12,12 @@ feed_outage_s: 30.0               # no option quote for this long in market hour
 tick_s: 1.0                       # engine clock tick (timers, bar close on a quiet feed, watchdog)
 checkpoint_every: 2000            # journal checkpoint (audit head) every N applied events
 operational_run_sessions: 30      # §17 phase 9 acceptance: consecutive sessions without unresolved critical incidents
+
+# Strategy book (NIFTY Options Strategy Book - Implementation Specification, 28 Nov 2026): ten independent
+# index-signal / option-buying strategies, forward-tested as their OWN paper run inside the same engine and feed.
+# Guard: kill switch only (user decision 28 Nov 2026). Names: app/book/strategies.py. Remove a code to pause it.
+book:
+  enabled: true
+  run_id: book_v1
+  codes: [U1, PB, Q1, Q2, Q3, Q4, Q5, Q6, Q7, Q8]
+  warmup_sessions: 35             # spec §2.1: >= 35 trading days of 1-minute index history

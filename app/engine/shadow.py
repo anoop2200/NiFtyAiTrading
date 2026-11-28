@@ -45,7 +45,8 @@ class ShadowSession:
     def _build(self, start: dict) -> None:
         spec = SessionSpec.from_json(start["spec"])
         s = PaperSession(spec, self._scratch, FeeSchedule.load(), TradingCalendar.load(), EventCalendar.load(),
-                         _recovering=True, warmup=start.get("warmup"), strategy_factory=self.strategy_factory)
+                         _recovering=True, warmup=start.get("warmup"), strategy_factory=self.strategy_factory,
+                         with_book=False)   # the book is shown from the engine snapshot (a full replay is slow)
         s.carry_in = start.get("carry") or {}
         s._open_risk_session(spec.gap_ratio if spec.prior_daily is None else None,
                              defer=spec.prior_daily is not None)

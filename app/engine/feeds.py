@@ -120,8 +120,9 @@ class LiveAdapter:
                          if r.get(f"bid_px_{i}") and r.get(f"bid_qty_{i}"))
             asks = tuple((float(r[f"ask_px_{i}"]), int(r[f"ask_qty_{i}"])) for i in range(1, 6)
                          if r.get(f"ask_px_{i}") and r.get(f"ask_qty_{i}"))
+            ltt = ev.get("ltt")
             self.session.quote(Quote(ev["recv_ns"], contract_key(exp, k, ot), bids, asks, ev.get("ltp"),
-                                     "observed_feed", True))
+                                     "observed_feed", True, ev.get("volume"), int(ltt) if ltt else None))
             self.quotes += 1
             return
         if sid in (self.index_id, self.future_id) or (self.vix_id and sid == self.vix_id):

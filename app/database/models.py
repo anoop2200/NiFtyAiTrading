@@ -7,7 +7,7 @@ from __future__ import annotations
 from sqlalchemy import Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 SCHEMA_DESCRIPTIONS = {
     1: "Phase 1: instruments, sessions, events, historical imports",
     2: "Phase 2: derived bar builds and daily data-quality matrix",
@@ -17,6 +17,7 @@ SCHEMA_DESCRIPTIONS = {
     6: "Phase 6: experiments, experiment results, strategy trial counter, hold-outs and hold-out access log",
     7: "Phase 9: paper-engine sessions and candidate trade labels (Phase 7 track)",
     8: "Phase 7: meta-model registry (training runs, model versions, predictions)",
+    9: "Strategy book: per-strategy forward-test trades with model and executable (ask/bid) P&L",
 }
 
 
@@ -210,6 +211,41 @@ class PaperTrades(Base):
     low_fidelity: Mapped[int] = mapped_column(Integer)
     fee_version: Mapped[str] = mapped_column(String(40))
     fill_model: Mapped[str] = mapped_column(String(40))
+
+
+class BookTrades(Base):
+    """Strategy-book trades (schema v9): the spec-model P&L (also in PaperTrades) plus the executable shadow."""
+    __tablename__ = "BookTrades"
+    __table_args__ = (UniqueConstraint("run_id", "session_date", "trade_id"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(60), index=True)
+    session_date: Mapped[str] = mapped_column(String(10), index=True)
+    trade_id: Mapped[int] = mapped_column(Integer)
+    code: Mapped[str] = mapped_column(String(8), index=True)            # specification code (U1, PB, Q1..Q8)
+    strategy_id: Mapped[str] = mapped_column(String(60), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    side: Mapped[str] = mapped_column(String(2))
+    contract: Mapped[str] = mapped_column(String(60))
+    strike: Mapped[float] = mapped_column(Float)
+    expiry: Mapped[str] = mapped_column(String(10))
+    qty: Mapped[int] = mapped_column(Integer)
+    exit_profile: Mapped[str] = mapped_column(String(4))
+    signal_ts: Mapped[str] = mapped_column(String(40))
+    entry_ts: Mapped[str] = mapped_column(String(40))
+    exit_ts: Mapped[str] = mapped_column(String(40))
+    entry_px: Mapped[float] = mapped_column(Float)
+    exit_px: Mapped[float] = mapped_column(Float)
+    exit_reason: Mapped[str] = mapped_column(String(20))
+    peak_px: Mapped[float] = mapped_column(Float)
+    gross_pnl: Mapped[float] = mapped_column(Float)
+    charges: Mapped[float] = mapped_column(Float)
+    net_pnl: Mapped[float] = mapped_column(Float)
+    r_multiple: Mapped[float | None] = mapped_column(Float)
+    exec_entry_px: Mapped[float | None] = mapped_column(Float)          # live ask at signal detection
+    exec_exit_px: Mapped[float | None] = mapped_column(Float)           # live bid when the model exit fired
+    exec_net_pnl: Mapped[float | None] = mapped_column(Float)
+    exec_note: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[str] = mapped_column(Text)                          # JSON: costs, features, trail
 
 
 class PaperTradeEvents(Base):

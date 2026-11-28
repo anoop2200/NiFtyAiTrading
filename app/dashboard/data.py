@@ -341,6 +341,49 @@ def live_journal_path(day: str, run_id: str | None = None) -> Path:
     return PROJECT_ROOT / "data" / "paper" / (run_id or paper_run_id()) / f"{day}.jsonl"
 
 
+def book_cfg() -> dict:
+    from app.config import PROJECT_ROOT
+    return yaml.safe_load((PROJECT_ROOT / "config" / "paper.yaml").read_text(encoding="utf-8")).get("book") or {}
+
+
+def book_snapshot(day: str, run_id: str | None = None) -> dict | None:
+    """The running engine's display snapshot of the strategy book (written every 5 s; final after closeout)."""
+    from app.config import PROJECT_ROOT
+    p = PROJECT_ROOT / "data" / "paper" / (run_id or book_cfg().get("run_id", "book_v1")) / f"{day}.live.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def book_trades(engine: Engine, run_id: str) -> pd.DataFrame:
+    try:
+        return q(engine, "SELECT * FROM BookTrades WHERE run_id = :r ORDER BY session_date, trade_id", r=run_id)
+    except Exception:  # noqa: BLE001 - table appears with schema v9
+        return pd.DataFrame()
+
+
+def book_summary(bt: pd.DataFrame) -> pd.DataFrame:
+    """Per-strategy forward-test summary (model and executable P&L)."""
+    from app.book.strategies import STRATEGIES
+    rows = []
+    for code in [c for c in STRATEGIES if c in set(bt["code"])]:
+        g = bt[bt["code"] == code].sort_values(["session_date", "exit_ts"])
+        w, lo = g[g.net_pnl > 0], g[g.net_pnl <= 0]
+        eq = g.net_pnl.cumsum()
+        ex = g.exec_net_pnl.dropna()
+        rows.append({"code": code, "strategy": STRATEGIES[code].name, "trades": len(g), "win %": round(100 * len(w) / len(g)),
+                     "profit factor": round(w.net_pnl.sum() / -lo.net_pnl.sum(), 2) if lo.net_pnl.sum() < 0 else None,
+                     "net ₹": round(g.net_pnl.sum()), "executable ₹": round(ex.sum()) if len(ex) else None,
+                     "max drawdown ₹": round((eq - eq.cummax().clip(lower=0)).min()),
+                     "avg win ₹": round(w.net_pnl.mean()) if len(w) else None,
+                     "avg loss ₹": round(lo.net_pnl.mean()) if len(lo) else None,
+                     "last trade": g.session_date.iloc[-1]})
+    return pd.DataFrame(rows)
+
+
 def live_journal_closed(day: str, run_id: str | None = None) -> bool:
     """True once the day's journal was closed out: the engine gzips it at 15:35 and removes the plain file."""
     p = live_journal_path(day, run_id)
